@@ -167,6 +167,7 @@ fragment float4 qfrag(QOut in [[stage_in]], constant IU& u [[buffer(0)]],
         int b = min(a + 1, lastCam);
         if (a > lastCam) a = lastCam;
         float w = float(choice - a * m) / float(max(1, m));
+        if (u.every > 1.5) { w = (w < 0.5) ? 0.0 : 1.0; }     // 降采样期禁用混合，零双影
         float4 ca = sampleCam(quilt, smp, a, pix, u);
         float4 cb = (b == a) ? ca : sampleCam(quilt, smp, b, pix, u);
         rgb[ch] = mix(ca[ch], cb[ch], w);         // R 取 ch0 的红, G 取 ch1 的绿, B 取 ch2 的蓝
@@ -187,6 +188,11 @@ fragment float4 qfrag(QOut in [[stage_in]], constant IU& u [[buffer(0)]],
 // MARK: - 几何
 
 struct VIn { var pos: (Float, Float, Float); var nrm: (Float, Float, Float); var col: (Float, Float, Float) }
+
+func smoothstepF(_ a: Float, _ b: Float, _ x: Float) -> Float {
+    let t = min(1, max(0, (x - a) / max(1e-6, b - a)))
+    return t * t * (3 - 2 * t)
+}
 
 func sphere(radius: Float, seg: Int = 48, ring: Int = 32, color: (Float, Float, Float)) -> ([VIn], [UInt32]) {
     var v: [VIn] = [], idx: [UInt32] = []
@@ -665,50 +671,34 @@ final class Renderer {
             let angDeg = (0.5 - Float(i) / Float(max(1, n - 1))) * Float(ipdDeg) + eyeOffsetDeg
             off = d * tan(angDeg * .pi / 180)
         } else {
-            let zoomComp = min(3.0, max(0.3, fitDist / max(0.03, d)))
             let cellsF: Float = Float(cells)
             let n1F: Float = Float(max(1, n - 1))
-            // 安全预算：单格融合角 7°、最外视点张角 35°、单侧上限 3.5%
-            let tanCell: Float = extreme ? 0.2679 : 0.12278     // tan15° / tan7°
-            let tanFan: Float  = extreme ? 1.0000 : 0.7002      // tan45° / tan35°
-            let dispCap: Float = (tanCell * cellsF) / (2.0 * leverBound * Tan)
-            let fanCap: Float = (tanFan * cellsF) / (n1F * leverBound * Tan)
-            let maxBudget = min(budgetPct / 100.0, min(dispCap, fanCap))
-
-            // —— 物理厘米 → 屏幕视差占比（0.8873 = IPD/W = 6.3/7.1）——
-            let Dcm = Double(viewDist) * 100.0
-            let rawVol = Float(0.8873 * (0.5 * Double(volCM)) / max(10.0, Dcm + 0.5 * Double(volCM)))
-            let effVol = min(rawVol * zoomComp, maxBudget * 0.85)          // 体积最多占 85% 预算
-            let remain = max(0, maxBudget - effVol)
-            // 出屏 cm → 共模视差：δ = IPD/W · Z/(D−Z)。正=出屏，负=入屏
-            let rawCen = Float(0.8873 * Double(popCM) / max(10.0, Dcm - Double(popCM)))
-            let effCen = min(remain, max(-remain, rawCen))                  // 吃剩余预算（超了自动削）
-            _ = targetDisparity                                             // 旧旋钮：仅保留兼容
-
-            // 温和透视补偿取代失控的 leverIso（6.29 → 1.2~2.2）
-            let perspComp: Float = min(2.2, max(1.2, lens / 45.0))
-            // 瑞利硬锁：相邻视点的屏幕位移 ≤ 0.45% 屏宽（≈6.5 px = 1 个透镜周期）
-            // 超出则单眼会看到"分离的硬边"而非"柔化边缘"
-            // 常态 = 瑞利无重影锁 0.45% 屏宽；极限模式放宽 3.1 倍（立体更强、接受重影）
-            // 上限只做"极端保护"，常态下不介入——否则 Z 作为深度增益会被 tanh 吃掉
-            // 模式 B（连续光场）：单步受透镜周期约束、扇面不出画
-            // 模式 A（离散超清）：每视点 ≥3 子像素，单步可放大到帕农融合极限（80 px）
-            let maxStepShift: Float = viewMode == 1
-                ? 0.111                                        // ≈80 px/步 = 帕农极限
-                : min((extreme ? 0.045 : 0.026) * rlMul, 0.36 / max(1.0, n1F))
-            // 每步"净位移" = 体积梯度 − 中心深度梯度（两者在 shift 里相减）
-            // 只对净位移施加上限，保持体积/中心的比例不变
-            // 体积步长：软饱和（tanh）后连续，不再硬夹断
-            let rawStepShift = Float(2.0 * Double(effVol) / cells) * perspComp
-            let stepShift = maxStepShift * tanh(rawStepShift / maxStepShift)
+            // === 正体视（Orthostereoscopic）精确还原 ===
+            // 横向比例尺：模型中心半宽 halfW_d = d·Tan
+            // 精确解：stepShift = κ · IPD / (D · cells · Tan)，与包围盒/半径估计完全无关
+            let kappaF: Float = max(0.05, volCM / 2.2)          // 体积cm 2.2 → 1:1 还原
+            let ipdRatio = (Double(ipdMM) * 0.001) / max(0.15, Double(viewDist))
+            let subpxPerView = Float(19.6349) / Float(max(1, n))
+            // 每视点 ≥3 子像素即摆脱子像素混叠 → 平滑解锁帕农大视差（取代 A/B 硬分支）
+            let isoF: Float = smoothstepF(1.2, 3.8, subpxPerView)
+            let smoothCap: Float = (extreme ? 0.045 : 0.028) * rlMul
+            let popCap: Float = 0.115 * rlMul
+            let activeCap: Float = smoothCap + (popCap - smoothCap) * isoF
+            let fanCapV: Float = (0.42 + (0.85 - 0.42) * isoF) / max(1.0, n1F)
+            let maxStepShift: Float = min(activeCap, fanCapV)
+            let rawStepShift: Float = (kappaF / Float(cells)) * Float(ipdRatio) * (lens / 18.0)
+            let stepShift: Float = maxStepShift * tanh(rawStepShift / max(1e-5, maxStepShift))
             rayleighHit = stepShift < rawStepShift * 0.97
-            let stepVol = stepShift / perspComp
-            _ = effCen
-            effVolTot = effVol; effCenTot = effCen; stepVolDbg = stepVol
-            // 出屏（共模）：独立通道，不挤占体积预算
-            let stepCen: Float = viewMode == 1
-                ? Float(2.0 * Double(effCen) / cells)
-                : min(Float(2.0 * Double(effCen) / cells), 0.05)
+            effVolTot = rawStepShift; stepVolDbg = stepShift
+            // 零视差面自动锚定：出屏量不得超过模型表面视差的 1.15 倍（保证模型始终接触最锐面）
+            let rRatio = min(0.35, max(0.08, rBound / max(0.1, d)))
+            let modelSurfaceStep = stepShift * rRatio
+            let Dcm = Double(viewDist) * 100.0
+            let rawCen = Float(0.8873 * (Double(popCM) - 1.0) / max(15.0, Dcm))
+            let smoothCenMax = modelSurfaceStep * 1.15
+            let maxCenStep = smoothCenMax + (0.06 - smoothCenMax) * isoF
+            let stepCen: Float = min(maxCenStep, max(-maxCenStep, Float(2.0 * Double(rawCen) / cells)))
+            effCenTot = stepCen * Float(cells) / 2.0
             let unitIdx = Float(i) / Float(max(1, n - 1)) - 0.5
             off = unitIdx * n1F * stepShift * halfW_d                       // 差模：体积（已是屏幕量）
             // 共模：旋转/缩放恒定的中心深度（与 off 同乘 unitIdx，否则只是 2D 横移）
