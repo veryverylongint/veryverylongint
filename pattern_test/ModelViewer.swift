@@ -481,9 +481,10 @@ final class Renderer {
     var lastGoZ: String = ""
     var flipY = false
     var axisMode: Int = 0                          // 0=Z-up 1=Y-up 2=Y-up 翻转
+    var viewMode: Int = 0                          // 0=B 稳定移动  1=A 跳变突出
     var dbgLastN: Float = -1; var dbgShiftMin: Float = 0; var dbgShiftMax: Float = 0
     var dbgStepPx: Float = 0; var rayleighHit = false
-    var effVolTot: Float = 0; var stepVolDbg: Float = 0
+    var effVolTot: Float = 0; var effCenTot: Float = 0; var stepVolDbg: Float = 0
     var flipZ = false
     var gozPos: [SIMD3<Float>] = []
     var gozIdx: [UInt32] = []
@@ -690,8 +691,11 @@ final class Renderer {
             // 超出则单眼会看到"分离的硬边"而非"柔化边缘"
             // 常态 = 瑞利无重影锁 0.45% 屏宽；极限模式放宽 3.1 倍（立体更强、接受重影）
             // 上限只做"极端保护"，常态下不介入——否则 Z 作为深度增益会被 tanh 吃掉
-            // 双上限：单步不超 (每步上限)，整扇面不超 0.28 NDC（否则外视点被拉出画外）
-            let maxStepShift: Float = min((extreme ? 0.045 : 0.026) * rlMul, 0.28 / max(1.0, n1F))
+            // 模式 B（连续光场）：单步受透镜周期约束、扇面不出画
+            // 模式 A（离散超清）：每视点 ≥3 子像素，单步可放大到帕农融合极限（80 px）
+            let maxStepShift: Float = viewMode == 1
+                ? 0.111                                        // ≈80 px/步 = 帕农极限
+                : min((extreme ? 0.045 : 0.026) * rlMul, 0.36 / max(1.0, n1F))
             // 每步"净位移" = 体积梯度 − 中心深度梯度（两者在 shift 里相减）
             // 只对净位移施加上限，保持体积/中心的比例不变
             // 体积步长：软饱和（tanh）后连续，不再硬夹断
@@ -700,8 +704,11 @@ final class Renderer {
             rayleighHit = stepShift < rawStepShift * 0.97
             let stepVol = stepShift / perspComp
             _ = effCen
-            effVolTot = effVol; stepVolDbg = stepVol
-            let stepCen: Float = 0          // 中心深度改由 dZero/halfW_zero 承担，不占体积预算
+            effVolTot = effVol; effCenTot = effCen; stepVolDbg = stepVol
+            // 出屏（共模）：独立通道，不挤占体积预算
+            let stepCen: Float = viewMode == 1
+                ? Float(2.0 * Double(effCen) / cells)
+                : min(Float(2.0 * Double(effCen) / cells), 0.05)
             let unitIdx = Float(i) / Float(max(1, n - 1)) - 0.5
             off = unitIdx * n1F * stepShift * halfW_d                       // 差模：体积（已是屏幕量）
             // 共模：旋转/缩放恒定的中心深度（与 off 同乘 unitIdx，否则只是 2D 横移）
@@ -717,13 +724,13 @@ final class Renderer {
         if dbgLastN != Float(n) {
             dbgLastN = Float(n)
             FileHandle.standardError.write(String(format:
-              "[DBG] N=%d cells=%.2f effVol=%.3f%% persp=%.2f 每步=%.1fpx fan=[%.3f, %.3f] 瑞利锁=%d\n",
-              n, Float(cells), effVolTot*100, min(2.2, max(1.2, lens/45.0)), dbgStepPx, dbgShiftMin, dbgShiftMax, rayleighHit ? 1 : 0).data(using:.utf8)!)
+              "[DBG] N=%d M=%d cells=%.2f effVol=%.3f%% effCen=%.3f%% 每步=%.1fpx fan=[%.3f, %.3f]\n",
+              n, viewMode, Float(cells), effVolTot*100, effCenTot*100, dbgStepPx, dbgShiftMin, dbgShiftMax).data(using:.utf8)!)
         }
 
         // ★ 符号：proj 第 3 列乘 z_view（前方为负），必须取负才能抵消相机横移
-        var shift = -off / max(1e-6, halfW_zero) - centerShift
-        shift = max(-6.0, min(6.0, shift))      // 符号已正确，剪切只受显式上限约束
+        var shift = -off / max(1e-6, halfW_d) - centerShift
+        shift = max(-1.0, min(1.0, shift))      // 内容不出画      // 符号已正确，剪切只受显式上限约束
         let proj = perspective(fovy: vfov, aspect: aspect, near: 0.02, far: 60, shiftNDC: shift)
 
         // 平移在相机平面内做，保证拖到哪模型就走到哪（与俯仰角无关）
@@ -1319,9 +1326,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
         let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
         let bax = NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))
+        let bmode = NSButton(title: "模式 B→A", target: self, action: #selector(switchMode))
         let b3 = NSButton(checkboxWithTitle: "自动监听", target: self, action: #selector(toggleWatch(_:)))
         b3.state = .on
-        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4); btnRow.addArrangedSubview(bcal); btnRow.addArrangedSubview(bax); btnRow.addArrangedSubview(b3)
+        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4); btnRow.addArrangedSubview(bcal); btnRow.addArrangedSubview(bax); btnRow.addArrangedSubview(bmode); btnRow.addArrangedSubview(b3)
         stack.addArrangedSubview(btnRow)
 
         let dropHint = NSTextField(labelWithString: "把 .GoZ 文件直接拖进这个窗口也能载入")
@@ -1412,6 +1420,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
                 }
             }
         }
+    }
+
+    @objc func switchMode() {
+        // A：N=4 跳变突出（每视点 4.9 子像素，单步可到帕农极限）
+        // B：N=20 稳定移动（每步受透镜周期约束）
+        renderer.viewMode = renderer.viewMode == 0 ? 1 : 0
+        if renderer.viewMode == 1 {
+            renderer.views = 4; renderer.volCM = 4.0; renderer.popCM = 8.0   // 强出屏预设
+        } else {
+            renderer.views = 20; renderer.volCM = 2.2; renderer.popCM = 1.5  // 稳定预设
+        }
+        gozStatus?.stringValue = renderer.viewMode == 1
+            ? "模式 A：N=4 跳变突出（强出屏）"
+            : "模式 B：N=20 稳定移动（弱但稳）"
+        gozStatus?.textColor = .labelColor
+        markDirty()
     }
 
     @objc func cycleAxis() {
