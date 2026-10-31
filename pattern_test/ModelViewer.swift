@@ -579,9 +579,14 @@ final class Renderer {
         var sp = sphere(radius: 0.15, color: (0.92, 0.60, 0.28))
         for i in sp.0.indices { sp.0[i].pos.0 += 0.45; sp.0[i].pos.1 += 0.15 }
         add(sp)
-        var bar = box(size: 0.06, color: (0.35, 0.85, 0.55))
-        for i in bar.0.indices { bar.0[i].pos.1 += 0.30; bar.0[i].pos.2 += 0.32 }
-        add(bar)
+        // 指向观察者的长梁（0.08 × 0.08 × 1.2）：深度轴被拉伸/压扁时，长宽比会立刻变样
+        var beam = box(size: 0.08, color: (0.35, 0.85, 0.55))
+        for i in beam.0.indices {
+            beam.0[i].pos.2 *= 15.0                     // 拉成 1.2 长
+            beam.0[i].pos.1 += 0.30
+            beam.0[i].pos.2 -= 0.60                     // 尾部穿过零视差面
+        }
+        add(beam)
         modelRadii = SIMD3<Float>(0.42, 0.30, 0.32)
         modelCenterY = 0.30
         // 3/4 视角：正对看立方体只会看到正方形，斜一点才能判断"深"
