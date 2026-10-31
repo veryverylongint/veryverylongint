@@ -950,6 +950,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         }
         if let i = argv.firstIndex(of: "--pitch"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.pitch = v * .pi / 180 }
         if argv.contains("--mono") { renderer.params.mono = 1 }
+        if let i = argv.firstIndex(of: "--rot"), i + 1 < argv.count {
+            let parts = argv[i + 1].split(separator: ",").compactMap { Float($0) }
+            if parts.count == 2 {
+                let axis: SIMD3<Float> = parts[0] < 0.5 ? SIMD3(1,0,0) : (parts[0] < 1.5 ? SIMD3(0,1,0) : SIMD3(0,0,1))
+                renderer.rotQ = simd_quatf(angle: parts[1] * .pi / 180, axis: axis)
+            }
+        }
         if let i = argv.firstIndex(of: "--yaw"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.yaw = v * .pi / 180 }
         if let i = argv.firstIndex(of: "--views"), i + 1 < argv.count, let v = Int(argv[i + 1]) { renderer.views = v }
         if let i = argv.firstIndex(of: "--lens"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.lens = v }
