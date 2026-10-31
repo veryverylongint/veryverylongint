@@ -26,7 +26,8 @@ struct U {
     float4   light;     // xyz, w=unused
     float4   eye;
     float4   tint;      // rgb, w = checker scale (0 = 平涂)
-    float4   flags;     // x = 高光强度
+    float4   flags;     // x = 高光强度, y = 材质, z = 曝光
+    float4   post;      // x = 对比度
 };
 
 vertex VOut vmain(uint vid [[vertex_id]], constant VIn* verts [[buffer(0)]], constant U& u [[buffer(1)]]) {
@@ -93,6 +94,9 @@ fragment float4 fmain(VOut in [[stage_in]], constant U& u [[buffer(1)]]) {
     lit = pow(lit, float3(1.0 / 1.9));        // 提亮中间调
     float lum = dot(lit, float3(0.299, 0.587, 0.114));
     lit = mix(float3(lum), lit, 1.18);        // 轻微提饱和（原来偏灰）
+    float3 sc = lit * lit * (3.0 - 2.0 * lit);     // smoothstep S 曲线
+    lit = mix(lit, sc, clamp(u.post.x - 1.0, 0.0, 0.9));   // 1.0=原样，>1 增对比
+    lit = clamp(lit, 0.0, 1.0);
     return float4(lit, 1.0);
 }
 
@@ -399,7 +403,8 @@ func parseGoZ(_ url: URL) -> GoZResult? {
 
 struct U { var mvp = matrix_identity_float4x4; var nm = matrix_identity_float4x4
            var light = SIMD4<Float>(0.5, 0.8, 0.6, 0); var eye = SIMD4<Float>(0, 0, 0, 1)
-           var tint = SIMD4<Float>(1, 1, 1, 0); var flags = SIMD4<Float>(0.5, 0, 0, 0) }
+           var tint = SIMD4<Float>(1, 1, 1, 0); var flags = SIMD4<Float>(0.5, 0, 0, 0)
+           var post = SIMD4<Float>(1.25, 0, 0, 0) }        // 必须放在最后，与 MSL 一致
 
 struct IU { var lineNumber: Float = 19.6349; var obliquity: Float = 0.103813
             var deviation: Float = 3.8456375; var views: Float = 40
@@ -527,6 +532,7 @@ final class Renderer {
     var lightGain: Float = 1.25                    // 曝光（默认偏亮）
     var lightAzDeg: Float = 315                     // 光方位（0=+Z，逆时针）
     var lightElDeg: Float = 40                      // 光高度角
+    var contrast: Float = 1.25                      // 显示对比度
     var perfFrom: Int = 0                          // 0 = 不降采样；≥ 该视点数才降
     var dbgLastN: Float = -1; var dbgShiftMin: Float = 0; var dbgShiftMax: Float = 0
     var dbgStepPx: Float = 0; var rayleighHit = false
@@ -797,6 +803,7 @@ final class Renderer {
         let e4 = simd_inverse(viewM) * SIMD4<Float>(0, 0, 0, 1)
         u.eye = SIMD4<Float>(e4.x, e4.y, e4.z, 1)
         u.flags = SIMD4<Float>(0.45, Float(material), lightGain, 0)
+        u.post = SIMD4<Float>(contrast, 0, 0, 0)
         for (_, m) in meshes.enumerated() {
             u.tint = SIMD4<Float>(1, 1, 1, 0)          // 地面已删除，不再有暗色网格材质
             enc.setVertexBuffer(m.vbuf, offset: 0, index: 0)
@@ -1039,6 +1046,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         if argv.contains("--mono") { renderer.params.mono = 1 }
         if let i = argv.firstIndex(of: "--axis"), i + 1 < argv.count, let v = Int(argv[i + 1]) { renderer.axisMode = v; if !renderer.gozPos.isEmpty { _ = renderer.rebuildGoZ() } }
         if argv.contains("--cal") { _ = renderer.buildCalibration() }
+        if let i = argv.firstIndex(of: "--contrast"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.contrast = v }
         if let i = argv.firstIndex(of: "--mat"), i + 1 < argv.count, let v = Int(argv[i + 1]) { renderer.material = v }
         if let i = argv.firstIndex(of: "--zone"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.zoneDeg = v }
         if let i = argv.firstIndex(of: "--rot"), i + 1 < argv.count {
@@ -1314,6 +1322,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         sliderRow("视角°", 0, 360, Double(renderer.yaw * 180 / .pi))
         sliderRow("光方位°", 0, 360, Double(renderer.lightAzDeg))
         sliderRow("光高度°", -80, 85, Double(renderer.lightElDeg))
+        sliderRow("对比度", 0.8, 1.8, Double(renderer.contrast))
         sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
         sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
         sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
@@ -1613,6 +1622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         case "视角°": renderer.yaw = Float(val) * .pi / 180; markDirty()
         case "光方位°": renderer.lightAzDeg = Float(val); markDirty()
         case "光高度°": renderer.lightElDeg = Float(val); markDirty()
+        case "对比度": renderer.contrast = Float(val); markDirty()
         case "视点偏移": renderer.eyeOffsetDeg = Float(val)
         case "焦平面": renderer.focalOffset = Float(val)
         case "体积cm": renderer.volCM = Float(val)
