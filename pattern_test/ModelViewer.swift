@@ -791,7 +791,7 @@ final class Renderer {
             if params.marker > 0.5 {
                 var mu = MU(rect: SIMD4<Float>(0.085, 0.062, 0.075, 0.0422),
                             color: SIMD4<Float>(0.35, 1.0, 0.45, 1),
-                            side: (Float(slot) / Float(max(1, views - 1)) - 0.5) * 0.03)
+                            side: (Float(slot) / Float(max(1, views - 1)) - 0.5) * 0.08)   // 加大视差：浮起距离更容易用指尖比对
                 enc.setRenderPipelineState(markPSO)
                 enc.setDepthStencilState(nil)
                 enc.setFragmentBytes(&mu, length: MemoryLayout<MU>.stride, index: 2)
@@ -1554,6 +1554,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let fringePer = fringePx / 6.545
         l.stringValue += String(format: " · 每步 %.1fpx(%.1f周期) 彩边 %.0fpx", renderer.dbgStepPx, renderer.dbgStepPx / 6.545, fringePx)
         if renderer.rayleighHit { l.stringValue += " · 瑞利锁生效" }
+        // 标记的理论浮起距离（若 Z = 40/60/90）——用指尖比对即可反推真实 Z
+        let mkS: Double = 0.08 * 35.5          // 标记每视点位移 = 0.08 NDC × 35.5 mm
+        let ipdDegNow = 2.0 * atan(Double(renderer.ipdMM) / 1000.0 / (2.0 * vd)) * 180.0 / .pi
+        func mz(_ Z: Double) -> Double {
+            let c = max(1.0, Double(renderer.views) * ipdDegNow / Z)
+            let pm = c * mkS
+            return vd * 1000.0 * pm / (Double(renderer.ipdMM) + pm)
+        }
+        l.stringValue += String(format: " · 标记浮起 Z40/60/90 = %.1f/%.1f/%.1f mm", mz(40), mz(60), mz(90))
         let nRec = max(2, Int((Double(renderer.zoneDeg) / eyeDegNow).rounded()))
         // 甜点覆盖：相邻视点的眼区间距 vs 瞳距。间距 ≥ 瞳距 → 中间有"丢立体"的空档
         let cellDeg = Double(renderer.zoneDeg) / Double(max(1, renderer.views))
