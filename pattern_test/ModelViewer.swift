@@ -69,18 +69,22 @@ fragment float4 fmain(VOut in [[stage_in]], constant U& u [[buffer(1)]]) {
         float fill = smoothstep(0.75, 0.05, d2) * 0.30;   // 右下补光
         float wrap = smoothstep(1.05, 0.35, d1) * 0.28;   // 包裹光，避免死黑
         float3 shade = float3(0.20 + 0.92 * key + fill + wrap);
-        lit = base * shade * gain;
+        lit = base * shade;
     } else if (mat == 2) {
         // 金属：高对比 + 强环境反射感
         float spec = pow(max(dot(n, h), 0.0), 90.0) * 1.4;
         float env = pow(1.0 - max(dot(n, V), 0.0), 1.6);
-        lit = (base * (0.10 + 0.45 * diff) + float3(spec) + float3(env * 0.55)) * gain;
+        lit = base * (0.10 + 0.45 * diff) + float3(spec) + float3(env * 0.55);
     } else {
         // 哑光：整体提亮（原 0.22 太暗）
         float spec = pow(max(dot(n, h), 0.0), 48.0) * u.flags.x;
         float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.30;
-        lit = (base * (0.38 + 1.00 * diff) + float3(spec) + float3(rim) * 0.5) * gain;
+        lit = base * (0.38 + 1.00 * diff) + float3(spec) + float3(rim) * 0.5;
     }
+    // 曝光 + 色调映射：无论材质多亮都不会过曝，暗部也不会死黑
+    lit = max(lit, 0.0) * gain;
+    lit = lit / (1.0 + lit);                  // Reinhard 压缩高光
+    lit = pow(lit, float3(1.0 / 1.9));        // 提亮中间调
     return float4(lit, 1.0);
 }
 
@@ -512,7 +516,9 @@ final class Renderer {
     var axisMode: Int = 0                          // 0=Z-up 1=Y-up 2=Y-up 翻转
     var viewMode: Int = 0                          // 0=B 稳定移动  1=A 跳变突出
     var material: Int = 0                          // 0 哑光 1 影棚MatCap 2 金属
-    var lightGain: Float = 1.15                    // 亮度增益
+    var lightGain: Float = 1.0                     // 曝光
+    var lightAzDeg: Float = 315                     // 光方位（0=+Z，逆时针）
+    var lightElDeg: Float = 40                      // 光高度角
     var perfFrom: Int = 0                          // 0 = 不降采样；≥ 该视点数才降
     var dbgLastN: Float = -1; var dbgShiftMin: Float = 0; var dbgShiftMax: Float = 0
     var dbgStepPx: Float = 0; var rayleighHit = false
@@ -776,9 +782,9 @@ final class Renderer {
         let (mvp, viewM) = cameraMatrix(view: i, n: n)
         u.mvp = mvp
         u.nm = simd_transpose(simd_inverse(viewM)) * modelMatrix()
-        // 光源跟随模型姿态的逆变换 → 改轴向/旋转模型时光照关系不变
-        let lw = simd_normalize(SIMD3<Float>(-0.45, 0.85, 0.55))
-        let lw2 = simd_normalize(rotQ.inverse.act(lw))
+        // 固定世界光（可调方位/高度）：旋转模型时高光在表面扫过，符合台灯直觉
+        let az = lightAzDeg * .pi / 180, el = lightElDeg * .pi / 180
+        let lw2 = simd_normalize(SIMD3<Float>(cos(el) * sin(az), sin(el), cos(el) * cos(az)))
         u.light = SIMD4<Float>(lw2.x, lw2.y, lw2.z, 0)
         let e4 = simd_inverse(viewM) * SIMD4<Float>(0, 0, 0, 1)
         u.eye = SIMD4<Float>(e4.x, e4.y, e4.z, 1)
@@ -1296,7 +1302,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         sliderRow("焦距mm", 6, 600, Double(renderer.lens))
         header("交织")
         sliderRow("降采样起始N", 0, 40, Double(renderer.perfFrom))
-        sliderRow("亮度", 0.3, 2.5, Double(renderer.lightGain))
+        sliderRow("曝光", 0.3, 2.5, Double(renderer.lightGain))
+        sliderRow("光方位°", 0, 360, Double(renderer.lightAzDeg))
+        sliderRow("光高度°", -80, 85, Double(renderer.lightElDeg))
         sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
         sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
         sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
@@ -1592,7 +1600,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         case "视点数": renderer.views = Int(val.rounded())
         case "实渲间隔": renderer.every = max(1, Int(val.rounded()))
         case "降采样起始N": renderer.perfFrom = Int(val.rounded()); markDirty()
-        case "亮度": renderer.lightGain = Float(val); markDirty()
+        case "曝光": renderer.lightGain = Float(val); markDirty()
+        case "光方位°": renderer.lightAzDeg = Float(val); markDirty()
+        case "光高度°": renderer.lightElDeg = Float(val); markDirty()
         case "视点偏移": renderer.eyeOffsetDeg = Float(val)
         case "焦平面": renderer.focalOffset = Float(val)
         case "体积cm": renderer.volCM = Float(val)
