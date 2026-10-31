@@ -70,6 +70,12 @@ fragment float4 fmain(VOut in [[stage_in]], constant U& u [[buffer(1)]]) {
         float wrap = smoothstep(1.05, 0.35, d1) * 0.28;   // 包裹光，避免死黑
         float3 shade = float3(0.20 + 0.92 * key + fill + wrap);
         lit = base * shade;
+    } else if (mat == 3) {
+        // 蜡质：包裹式漫反射 + 通透感 + 低角度高光，强化体块
+        float wrap = max(0.0, dot(n, L) * 0.5 + 0.5);        // 半兰伯特，暗部不死
+        float spec = pow(max(dot(n, h), 0.0), 12.0) * 0.45;  // 宽而柔的高光
+        float ssr = pow(1.0 - max(dot(n, V), 0.0), 1.6) * 0.35;
+        lit = base * (0.55 + 0.85 * wrap) + base * 0.22 + float3(spec) + float3(ssr);
     } else if (mat == 2) {
         // 金属：高对比 + 强环境反射感
         float spec = pow(max(dot(n, h), 0.0), 90.0) * 1.4;
@@ -85,6 +91,8 @@ fragment float4 fmain(VOut in [[stage_in]], constant U& u [[buffer(1)]]) {
     lit = max(lit, 0.0) * gain;
     lit = lit / (1.0 + lit);                  // Reinhard 压缩高光
     lit = pow(lit, float3(1.0 / 1.9));        // 提亮中间调
+    float lum = dot(lit, float3(0.299, 0.587, 0.114));
+    lit = mix(float3(lum), lit, 1.18);        // 轻微提饱和（原来偏灰）
     return float4(lit, 1.0);
 }
 
@@ -516,7 +524,7 @@ final class Renderer {
     var axisMode: Int = 0                          // 0=Z-up 1=Y-up 2=Y-up 翻转
     var viewMode: Int = 0                          // 0=B 稳定移动  1=A 跳变突出
     var material: Int = 0                          // 0 哑光 1 影棚MatCap 2 金属
-    var lightGain: Float = 1.0                     // 曝光
+    var lightGain: Float = 1.25                    // 曝光（默认偏亮）
     var lightAzDeg: Float = 315                     // 光方位（0=+Z，逆时针）
     var lightElDeg: Float = 40                      // 光高度角
     var perfFrom: Int = 0                          // 0 = 不降采样；≥ 该视点数才降
@@ -1303,6 +1311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         header("交织")
         sliderRow("降采样起始N", 0, 40, Double(renderer.perfFrom))
         sliderRow("曝光", 0.3, 2.5, Double(renderer.lightGain))
+        sliderRow("视角°", 0, 360, Double(renderer.yaw * 180 / .pi))
         sliderRow("光方位°", 0, 360, Double(renderer.lightAzDeg))
         sliderRow("光高度°", -80, 85, Double(renderer.lightElDeg))
         sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
@@ -1360,7 +1369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
         let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
         let bax = NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))
-        let matSeg = NSSegmentedControl(labels: ["哑光", "影棚", "金属"], trackingMode: .selectOne,
+        let matSeg = NSSegmentedControl(labels: ["哑光", "影棚", "金属", "蜡质"], trackingMode: .selectOne,
                                         target: self, action: #selector(segMaterial(_:)))
         matSeg.selectedSegment = renderer.material
         let bref = NSButton(title: "参考档", target: self, action: #selector(applyRefPreset))
@@ -1483,7 +1492,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
     func nudge(_ dx: Float, _ dy: Float) {
         let len = sqrt(dx * dx + dy * dy)
         let axis = simd_normalize(SIMD3<Float>(dy, dx, 0))
-        renderer.rotQ = simd_normalize(simd_quatf(angle: len * 0.10, axis: axis) * renderer.rotQ)
+        renderer.rotQ = simd_normalize(simd_quatf(angle: len * 0.5 * .pi, axis: axis) * renderer.rotQ)   // 90° 步进
         markDirty()
     }
 
@@ -1601,6 +1610,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         case "实渲间隔": renderer.every = max(1, Int(val.rounded()))
         case "降采样起始N": renderer.perfFrom = Int(val.rounded()); markDirty()
         case "曝光": renderer.lightGain = Float(val); markDirty()
+        case "视角°": renderer.yaw = Float(val) * .pi / 180; markDirty()
         case "光方位°": renderer.lightAzDeg = Float(val); markDirty()
         case "光高度°": renderer.lightElDeg = Float(val); markDirty()
         case "视点偏移": renderer.eyeOffsetDeg = Float(val)
