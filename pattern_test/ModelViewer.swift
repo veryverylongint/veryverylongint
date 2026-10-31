@@ -55,18 +55,31 @@ fragment float4 fmain(VOut in [[stage_in]], constant U& u [[buffer(1)]]) {
 
     float diff = max(dot(n, L), 0.0);
     float3 h = normalize(L + V);
+    float gain = u.flags.z > 0.0 ? u.flags.z : 1.0;      // 亮度增益
+    int mat = int(u.flags.y + 0.5);
     float3 lit;
-    if (u.flags.y > 0.5) {
-        // 手办 PVC：半透白感 + 高光收敛 + 轮廓菲涅尔
-        float spec = pow(max(dot(n, h), 0.0), 28.0) * 1.15;
-        float spec2 = pow(max(dot(n, h), 0.0), 5.0) * 0.25;      // 柔和的次级高光
-        float fres = pow(1.0 - max(dot(n, V), 0.0), 2.2) * 0.55;
-        float3 sssv = base * (0.30 + 0.78 * diff) + base * 0.18;  // 打底的通透底色
-        lit = sssv + float3(spec + spec2) + float3(fres) * 0.85;
+    if (mat == 1) {
+        // 影棚 MatCap：用视空间法线做程序化球形光照贴图，干净清晰、不过曝
+        float3 R = normalize(cross(V, float3(0.0, 1.0, 0.0)));
+        float3 Up = cross(R, V);
+        float2 muv = float2(dot(n, R), dot(n, Up)) * 0.5 + 0.5;
+        float d1 = length((muv - float2(0.34, 0.28)) * float2(1.0, 1.15));
+        float d2 = length((muv - float2(0.66, 0.74)) * float2(1.0, 1.15));
+        float key  = smoothstep(0.52, 0.02, d1);          // 左上主光
+        float fill = smoothstep(0.75, 0.05, d2) * 0.30;   // 右下补光
+        float wrap = smoothstep(1.05, 0.35, d1) * 0.28;   // 包裹光，避免死黑
+        float3 shade = float3(0.20 + 0.92 * key + fill + wrap);
+        lit = base * shade * gain;
+    } else if (mat == 2) {
+        // 金属：高对比 + 强环境反射感
+        float spec = pow(max(dot(n, h), 0.0), 90.0) * 1.4;
+        float env = pow(1.0 - max(dot(n, V), 0.0), 1.6);
+        lit = (base * (0.10 + 0.45 * diff) + float3(spec) + float3(env * 0.55)) * gain;
     } else {
+        // 哑光：整体提亮（原 0.22 太暗）
         float spec = pow(max(dot(n, h), 0.0), 48.0) * u.flags.x;
-        float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.35;
-        lit = base * (0.22 + 0.85 * diff) + float3(spec) + float3(rim) * 0.6;
+        float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.30;
+        lit = (base * (0.38 + 1.00 * diff) + float3(spec) + float3(rim) * 0.5) * gain;
     }
     return float4(lit, 1.0);
 }
@@ -498,7 +511,8 @@ final class Renderer {
     var flipY = false
     var axisMode: Int = 0                          // 0=Z-up 1=Y-up 2=Y-up 翻转
     var viewMode: Int = 0                          // 0=B 稳定移动  1=A 跳变突出
-    var materialPVC = false                        // 手办 PVC 材质
+    var material: Int = 0                          // 0 哑光 1 影棚MatCap 2 金属
+    var lightGain: Float = 1.15                    // 亮度增益
     var perfFrom: Int = 0                          // 0 = 不降采样；≥ 该视点数才降
     var dbgLastN: Float = -1; var dbgShiftMin: Float = 0; var dbgShiftMax: Float = 0
     var dbgStepPx: Float = 0; var rayleighHit = false
@@ -768,7 +782,7 @@ final class Renderer {
         u.light = SIMD4<Float>(lw2.x, lw2.y, lw2.z, 0)
         let e4 = simd_inverse(viewM) * SIMD4<Float>(0, 0, 0, 1)
         u.eye = SIMD4<Float>(e4.x, e4.y, e4.z, 1)
-        u.flags = SIMD4<Float>(0.45, materialPVC ? 1 : 0, 0, 0)
+        u.flags = SIMD4<Float>(0.45, Float(material), lightGain, 0)
         for (_, m) in meshes.enumerated() {
             u.tint = SIMD4<Float>(1, 1, 1, 0)          // 地面已删除，不再有暗色网格材质
             enc.setVertexBuffer(m.vbuf, offset: 0, index: 0)
@@ -1011,6 +1025,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         if argv.contains("--mono") { renderer.params.mono = 1 }
         if let i = argv.firstIndex(of: "--axis"), i + 1 < argv.count, let v = Int(argv[i + 1]) { renderer.axisMode = v; if !renderer.gozPos.isEmpty { _ = renderer.rebuildGoZ() } }
         if argv.contains("--cal") { _ = renderer.buildCalibration() }
+        if let i = argv.firstIndex(of: "--mat"), i + 1 < argv.count, let v = Int(argv[i + 1]) { renderer.material = v }
         if let i = argv.firstIndex(of: "--zone"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.zoneDeg = v }
         if let i = argv.firstIndex(of: "--rot"), i + 1 < argv.count {
             let parts = argv[i + 1].split(separator: ",").compactMap { Float($0) }
@@ -1281,6 +1296,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         sliderRow("焦距mm", 6, 600, Double(renderer.lens))
         header("交织")
         sliderRow("降采样起始N", 0, 40, Double(renderer.perfFrom))
+        sliderRow("亮度", 0.3, 2.5, Double(renderer.lightGain))
         sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
         sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
         sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
@@ -1336,10 +1352,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
         let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
         let bax = NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))
-        let matSeg = NSSegmentedControl(labels: ["哑光", "PVC"], trackingMode: .selectOne,
+        let matSeg = NSSegmentedControl(labels: ["哑光", "影棚", "金属"], trackingMode: .selectOne,
                                         target: self, action: #selector(segMaterial(_:)))
-        matSeg.selectedSegment = renderer.materialPVC ? 1 : 0
+        matSeg.selectedSegment = renderer.material
         let bref = NSButton(title: "参考档", target: self, action: #selector(applyRefPreset))
+        let rotRow = NSStackView(); rotRow.orientation = .horizontal; rotRow.spacing = 4
+        for (t, sel) in [("◀", #selector(nudgeL)), ("▶", #selector(nudgeR)),
+                         ("▲", #selector(nudgeU)), ("▼", #selector(nudgeD))] {
+            let b = NSButton(title: t, target: self, action: sel)
+            b.bezelStyle = .rounded; b.font = .systemFont(ofSize: 11)
+            rotRow.addArrangedSubview(b)
+        }
         let bmode = NSSegmentedControl(labels: ["精确 B", "激进 A"], trackingMode: .selectOne,
                                        target: self, action: #selector(segMode(_:)))
         bmode.selectedSegment = renderer.viewMode
@@ -1353,6 +1376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         btnRow2.addArrangedSubview(matSeg); btnRow2.addArrangedSubview(bref); btnRow2.addArrangedSubview(b3)
         stack.addArrangedSubview(btnRow)
         stack.addArrangedSubview(btnRow2)
+        stack.addArrangedSubview(rotRow)
 
         let dropHint = NSTextField(labelWithString: "把 .GoZ 文件直接拖进这个窗口也能载入")
         dropHint.font = .systemFont(ofSize: 9)
@@ -1444,8 +1468,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         }
     }
 
+    @objc func nudgeL() { nudge(-1, 0) }
+    @objc func nudgeR() { nudge(1, 0) }
+    @objc func nudgeU() { nudge(0, -1) }
+    @objc func nudgeD() { nudge(0, 1) }
+    func nudge(_ dx: Float, _ dy: Float) {
+        let len = sqrt(dx * dx + dy * dy)
+        let axis = simd_normalize(SIMD3<Float>(dy, dx, 0))
+        renderer.rotQ = simd_normalize(simd_quatf(angle: len * 0.10, axis: axis) * renderer.rotQ)
+        markDirty()
+    }
+
     @objc func segMaterial(_ seg: NSSegmentedControl) {
-        renderer.materialPVC = seg.selectedSegment == 1
+        renderer.material = seg.selectedSegment
         markDirty()
     }
 
@@ -1557,6 +1592,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         case "视点数": renderer.views = Int(val.rounded())
         case "实渲间隔": renderer.every = max(1, Int(val.rounded()))
         case "降采样起始N": renderer.perfFrom = Int(val.rounded()); markDirty()
+        case "亮度": renderer.lightGain = Float(val); markDirty()
         case "视点偏移": renderer.eyeOffsetDeg = Float(val)
         case "焦平面": renderer.focalOffset = Float(val)
         case "体积cm": renderer.volCM = Float(val)
