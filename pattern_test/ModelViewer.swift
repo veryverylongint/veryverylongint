@@ -167,7 +167,7 @@ fragment float4 qfrag(QOut in [[stage_in]], constant IU& u [[buffer(0)]],
         int b = min(a + 1, lastCam);
         if (a > lastCam) a = lastCam;
         float w = float(choice - a * m) / float(max(1, m));
-        if (u.every > 1.5) { w = (w < 0.5) ? 0.0 : 1.0; }     // 降采样期禁用混合，零双影
+        // 保留线性插值：最近邻硬切会在停手切回全视点时产生位置跳变
         float4 ca = sampleCam(quilt, smp, a, pix, u);
         float4 cb = (b == a) ? ca : sampleCam(quilt, smp, b, pix, u);
         rgb[ch] = mix(ca[ch], cb[ch], w);         // R 取 ch0 的红, G 取 ch1 的绿, B 取 ch2 的蓝
@@ -681,10 +681,10 @@ final class Renderer {
             let subpxPerView = Float(19.6349) / Float(max(1, n))
             // 每视点 ≥3 子像素即摆脱子像素混叠 → 平滑解锁帕农大视差（取代 A/B 硬分支）
             let isoF: Float = smoothstepF(1.2, 3.8, subpxPerView)
-            let smoothCap: Float = (extreme ? 0.045 : 0.028) * rlMul
-            let popCap: Float = 0.115 * rlMul
+            let smoothCap: Float = (extreme ? 0.05 : 0.040) * rlMul   // 模式 B：把可用深度用满
+            let popCap: Float = 0.35 * rlMul                          // 模式 A：允许到 ~11 cm 出屏
             let activeCap: Float = smoothCap + (popCap - smoothCap) * isoF
-            let fanCapV: Float = (0.42 + (0.85 - 0.42) * isoF) / max(1.0, n1F)
+            let fanCapV: Float = (0.60 + (1.20 - 0.60) * isoF) / max(1.0, n1F)
             let maxStepShift: Float = min(activeCap, fanCapV)
             let rawStepShift: Float = (kappaF / Float(cells)) * Float(ipdRatio) * (lens / 18.0)
             let stepShift: Float = maxStepShift * tanh(rawStepShift / max(1e-5, maxStepShift))
@@ -720,7 +720,7 @@ final class Renderer {
 
         // ★ 符号：proj 第 3 列乘 z_view（前方为负），必须取负才能抵消相机横移
         var shift = -off / max(1e-6, halfW_d) - centerShift
-        shift = max(-1.0, min(1.0, shift))      // 内容不出画      // 符号已正确，剪切只受显式上限约束
+        shift = max(-1.2, min(1.2, shift))      // 内容不出画      // 符号已正确，剪切只受显式上限约束
         let proj = perspective(fovy: vfov, aspect: aspect, near: 0.02, far: 60, shiftNDC: shift)
 
         // 平移在相机平面内做，保证拖到哪模型就走到哪（与俯仰角无关）
@@ -779,7 +779,7 @@ final class Renderer {
         if !needsQuilt { return }
         needsQuilt = false
         // 拖动/缩放时每帧只渲 1/4 相机（5 台），停手后自动补一帧满视点
-        let m = max(1, min(views, isDragging ? max(every, 2) : every))
+        let m = max(1, min(views, isDragging ? min(2, views) : every))
         let camCount = (views + m - 1) / m
         let cols = camCount <= 8 ? camCount : 8
         let rows = (camCount + cols - 1) / cols
@@ -1320,8 +1320,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let bmode = NSButton(title: "模式 B→A", target: self, action: #selector(switchMode))
         let b3 = NSButton(checkboxWithTitle: "自动监听", target: self, action: #selector(toggleWatch(_:)))
         b3.state = .on
-        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4); btnRow.addArrangedSubview(bcal); btnRow.addArrangedSubview(bax); btnRow.addArrangedSubview(bmode); btnRow.addArrangedSubview(b3)
+        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4)
+        let btnRow2 = NSStackView()
+        btnRow2.orientation = .horizontal
+        btnRow2.spacing = 8
+        btnRow2.addArrangedSubview(bcal); btnRow2.addArrangedSubview(bax); btnRow2.addArrangedSubview(bmode); btnRow2.addArrangedSubview(b3)
         stack.addArrangedSubview(btnRow)
+        stack.addArrangedSubview(btnRow2)
 
         let dropHint = NSTextField(labelWithString: "把 .GoZ 文件直接拖进这个窗口也能载入")
         dropHint.font = .systemFont(ofSize: 9)
@@ -1493,7 +1498,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
     @objc func resetView() {
         renderer.yaw = 0; renderer.pitch = 0; renderer.dist = renderer.fitDist
         renderer.rotQ = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
-        renderer.modelScale = 1; renderer.panX = 0; renderer.panY = 0
+        renderer.panX = 0; renderer.panY = 0          // 不要动 modelScale（它是载入时算出的归一化尺度）
         markDirty()
     }
 
