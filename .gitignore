@@ -1,0 +1,15 @@
+.DS_Store
+*.app/
+pattern_test/ModelViewer
+pattern_test/PatternTest
+pattern_test/out/
+pattern_test/selftest/
+vendor/
+blender/
+refs/
+*.raw
+*.mp4
+*.mov
+*.ztl
+*.goz
+*.GoZ

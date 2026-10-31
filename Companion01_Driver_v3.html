@@ -1,0 +1,980 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Companion-01 光栅裸眼3D 独立驱动</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --panel:#ffffff; --line:#dcdfe6; --text:#1f2329;
+    --muted:#6b7280; --accent:#2563eb; --accent-soft:#e8f0fe; --warn:#b45309;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:#000;overflow:hidden;
+    font-family:"Microsoft YaHei","PingFang SC",system-ui,sans-serif;color:var(--text)}
+  #stage{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:#000}
+  canvas#out{width:100%;height:100%;object-fit:fill;image-rendering:pixelated;background:#000}
+  #panel{position:fixed;top:12px;left:12px;width:330px;max-height:calc(100vh - 24px);
+    overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;box-shadow:0 6px 24px rgba(0,0,0,.22);font-size:13px;z-index:20}
+  #panel.hidden{display:none}
+  h1{font-size:15px;margin:0 0 10px;letter-spacing:.3px}
+  h2{font-size:12px;margin:14px 0 6px;color:var(--muted);font-weight:600;
+     border-top:1px solid var(--line);padding-top:10px}
+  label{display:block;margin:8px 0 2px;color:var(--muted);font-size:12px}
+  .row{display:flex;align-items:center;gap:8px}
+  .row input[type=range]{flex:1;min-width:0}
+  .row .val{width:74px;text-align:right;font-variant-numeric:tabular-nums;
+     font-family:Consolas,monospace;font-size:12px;color:var(--accent)}
+  input[type=number],select{width:100%;padding:5px 7px;border:1px solid var(--line);
+     border-radius:6px;font-size:12px;background:#fff;color:var(--text)}
+  button{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:#fff;
+     color:var(--text);cursor:pointer;font-size:12px}
+  button:hover{background:var(--accent-soft);border-color:var(--accent)}
+  button.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+  button.primary:hover{filter:brightness(1.08)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+  .grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px}
+  .btns{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .hint{font-size:11px;color:var(--muted);line-height:1.55;margin-top:6px}
+  .tag{display:inline-block;padding:1px 6px;border-radius:4px;background:var(--accent-soft);
+     color:var(--accent);font-size:11px;font-family:Consolas,monospace}
+  .warn{color:var(--warn);font-size:11px;line-height:1.5}
+  #status{position:fixed;bottom:10px;left:12px;z-index:20;font-size:11px;color:#9aa0a6;
+     background:rgba(0,0,0,.55);padding:4px 9px;border-radius:5px;font-family:Consolas,monospace}
+  #toggle{position:fixed;top:12px;right:12px;z-index:30}
+  code{background:#f1f3f5;padding:1px 4px;border-radius:3px;font-size:11px}
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="out"></canvas></div>
+
+<button id="toggle" class="primary">面板 (H)</button>
+
+<div id="panel">
+  <h1>Companion-01 光栅驱动 <span class="tag">v1</span></h1>
+  <div class="hint">独立实现，不依赖 3DGallery / OpenstageAI。<br>
+    设备：<code>ZX1385</code> · 输出 <code>1440×2560</code> · 视点 <code>8×5=40</code></div>
+
+  <h2>渲染模式</h2>
+  <select id="selMode">
+    <option value="quilt">A · 40宫格图集（兼容 3DGallery 的 mp4）</option>
+    <option value="parallax">B · RGB + 深度实时视差（复刻 Any2C1）</option>
+  </select>
+  <div class="hint">模式A需要 4320×4800 图集；模式B只要一张 RGB 图和一张深度图，
+    按光线步进实时合成，无需云端预合成。</div>
+
+  <h2>视差参数（模式B）</h2>
+  <label>depthFactor（最大视差 = 0.2 × 此值）</label>
+  <div class="row"><input type="range" id="sDepthF" min="0" max="4" step="0.01">
+    <span class="val" id="vDepthF"></span></div>
+  <div class="btns">
+    <button id="btnInvD">深度反转: 关</button>
+    <button id="btnInvS">画面翻转: 关</button>
+    <button id="btnGamma">深度预处理: 开</button>
+  </div>
+
+  <h2>内容源</h2>
+  <div class="btns">
+    <button id="btnVideo">载入图集视频 (mp4/webm)</button>
+    <button id="btnImage">载入图集图片</button>
+  </div>
+  <div class="btns">
+    <button id="btnRgbd">载入 RGBD 并排图 (1080×960)</button>
+  </div>
+  <input type="file" id="fileVideo" accept="video/*" hidden>
+  <input type="file" id="fileImage" accept="image/*" hidden>
+  <input type="file" id="fileRgbd" accept="image/*" hidden>
+  <div class="hint" id="srcInfo">未载入。期望规格 4320×4800（8列×5行，单视点 540×960）。</div>
+  <div class="btns">
+    <button id="btnPlay">暂停</button>
+    <button id="btnLoop">循环: 开</button>
+  </div>
+
+  <h2>设备光栅参数</h2>
+  <label>lineNumber（光栅周期 interval，单位=子像素）</label>
+  <div class="row"><input type="range" id="sInterval" min="17" max="22" step="0.0001">
+    <span class="val" id="vInterval"></span></div>
+  <label>obliquity（倾斜斜率 slope）</label>
+  <div class="row"><input type="range" id="sSlope" min="-0.3" max="0.3" step="0.000001">
+    <span class="val" id="vSlope"></span></div>
+  <label>deviation / CenterOffset（相位 x0）</label>
+  <div class="row"><input type="range" id="sX0" min="-25" max="25" step="0.0001">
+    <span class="val" id="vX0"></span></div>
+  <label>OffsetY（图集纵向偏移）</label>
+  <div class="row"><input type="range" id="sOffsetY" min="-0.5" max="0.5" step="0.0005">
+    <span class="val" id="vOffsetY"></span></div>
+  <div class="btns">
+    <button id="btnReset">恢复设备出厂值</button>
+    <button id="btnExport">导出参数</button>
+  </div>
+  <div class="hint" id="derived">
+    —
+  </div>
+  <div class="hint" id="pixelFit">显示：—</div>
+
+  <h2>光栅校准（复刻 D20_Dice 单眼校准）</h2>
+  <div class="btns">
+    <button id="btnCalibStart" class="primary">进入校准画面</button>
+    <button id="btnCalibSolve">自动求对称周期</button>
+    <button id="btnCalibOk">确认校准结果</button>
+    <button id="btnCalibExit">退出校准</button>
+  </div>
+  <div class="hint">
+    用<b>一只眼睛</b>正对屏幕中心。<b>左右拖动鼠标</b>微调光栅周期，直到
+    <span style="color:#4ade80">左右两条绿条</span>与
+    <span style="color:#fff">中间白色条</span>在视觉上连成同一水平线，然后点击确认。<br>
+    原理：左右绿条取相反深度（最远 / 最近），周期误差会让二者的横向漂移不对称；
+    只有周期正确时二者才相对中间白条对称。
+  </div>
+  <div class="hint" id="calibInfo">未校准。</div>
+  <div class="hint">
+    微调范围限定在出厂值 ±0.075 —— 对称解每隔约 0.159 重复一次，限幅可避免调到错误的解。
+    校准结果略微偏离出厂值是正常的（补偿制造公差与眼睛位置）。
+  </div>
+
+  <h2>图集 / 输出几何</h2>
+  <div class="grid3">
+    <div><label>列 cols</label><input type="number" id="nCols" min="1" max="32" step="1"></div>
+    <div><label>行 rows</label><input type="number" id="nRows" min="1" max="32" step="1"></div>
+    <div><label>视点总数</label><input type="number" id="nViews" disabled></div>
+  </div>
+  <div class="grid2">
+    <div><label>输出宽</label><input type="number" id="nOutW" min="64" step="1"></div>
+    <div><label>输出高</label><input type="number" id="nOutH" min="64" step="1"></div>
+  </div>
+  <label>视点排列</label>
+  <select id="selOrder">
+    <option value="factory">原厂序（视点0在右下，逐列镜像）</option>
+    <option value="natural">自然序（视点0在左上，逐行）</option>
+  </select>
+  <div class="btns">
+    <button id="btnCalib">校准图（视点索引）</button>
+    <button id="btnSavePng">导出交织图 PNG</button>
+  </div>
+
+  <h2>图集生成（RGB + 深度 → 40 视点）</h2>
+  <div class="btns">
+    <button id="btnRgb">选 RGB 图</button>
+    <button id="btnDepth">选深度图</button>
+  </div>
+  <input type="file" id="fileRgb" accept="image/*" hidden>
+  <input type="file" id="fileDepth" accept="image/*" hidden>
+  <label>视差强度 disparity（像素）</label>
+  <div class="row"><input type="range" id="sDisp" min="-60" max="60" step="0.5">
+    <span class="val" id="vDisp"></span></div>
+  <label>景深聚焦面 focus（0=最近 1=最远）</label>
+  <div class="row"><input type="range" id="sFocus" min="0" max="1" step="0.01">
+    <span class="val" id="vFocus"></span></div>
+  <div class="btns">
+    <button id="btnGen" class="primary">生成图集并播放</button>
+    <button id="btnGenPng">保存图集 PNG</button>
+  </div>
+  <div class="hint">深度越亮＝越近。生成 4320×4800 的 8×5 图集，视点沿水平主视差、垂直辅助视差排列。</div>
+
+  <h2>投屏</h2>
+  <div class="btns">
+    <button id="btnFull" class="primary">全屏投到副屏 (F)</button>
+    <button id="btnFit">1:1 像素映射</button>
+  </div>
+  <div class="hint">把本窗口拖到 Companion-01 所在副屏后按 F 全屏。面板按 H 隐藏。</div>
+  <div class="warn" id="warnBox"></div>
+</div>
+
+<div id="status">就绪</div>
+
+<script>
+"use strict";
+/* =========================================================================
+   Companion-01（北京自由象限视觉科技）光栅裸眼3D 独立驱动
+   交织算法复刻自 3DGallery 内置 ShaderPass（assets/index-DEzz72gb.js）
+   设备参数来自 OpenstageAI/deviceConfig.json（AES 解密）
+   ========================================================================= */
+
+const DEVICE = {
+  deviceId:      "ZX1385",
+  deviceNumber:  "CP057010224340558",
+  lineNumber:    19.6349,     // interval
+  obliquity:     0.103813,    // slope
+  deviation:     3.8456375,   // x0
+  outW:          1440,
+  outH:          2560,
+  cols:          8,
+  rows:          5
+};
+
+const P = {
+  interval: DEVICE.lineNumber,
+  slope:    DEVICE.obliquity,
+  x0:       DEVICE.deviation,
+  offsetY:  0,
+  cols:     DEVICE.cols,
+  rows:     DEVICE.rows,
+  outW:     DEVICE.outW,
+  outH:     DEVICE.outH,
+  order:    "factory",
+  disparity: 24,
+  focus:     0.5,
+  mode:      "quilt",      // quilt = 40宫格图集 | parallax = RGB+深度实时视差
+  depthFactor: 1.0,        // maxParallax = 0.2 * depthFactor（与 Any2C1 一致）
+  inverseDepth: 0,         // Ctrl+Alt+I
+  inverseDisplay: 0,       // Ctrl+Alt+D
+  gammaDepth:   1          // depth = saturate(d*1.2-0.1) 预处理
+};
+
+const canvas = document.getElementById("out");
+const gl = canvas.getContext("webgl", {
+  preserveDrawingBuffer: true, antialias: false, alpha: false, depth: false
+});
+if (!gl) { document.getElementById("warnBox").textContent = "此浏览器不支持 WebGL"; }
+
+/* ------------------------------ shader ------------------------------ */
+const VS = `
+attribute vec2 aPos;
+varying vec2 vUV;
+void main(){ vUV = aPos * 0.5 + 0.5; gl_Position = vec4(aPos, 0.0, 1.0); }
+`;
+
+const FS = `
+#ifdef GL_ES
+precision highp float;
+#endif
+varying vec2 vUV;
+uniform sampler2D tDiffuse;
+uniform float slope;
+uniform float interval;
+uniform float x0;
+uniform float offsetY;
+uniform float row_img_num;
+uniform float col_img_num;
+uniform float num_of_view;
+uniform float gridSizeX;
+uniform float gridSizeY;
+uniform float orderFlag;   // 0 = 原厂序, 1 = 自然序
+
+vec2 get_choice(vec2 pos, float bias){
+    float x = floor(pos.x * gridSizeX) + 1.0;
+    float y = floor((1.0 - pos.y) * gridSizeY) + 1.0;
+
+    float x1 = (x + y * slope) * 3.0 + bias;      // *3 = RGB 子像素
+    float x_local = mod(x1 + x0, interval);
+
+    float choice = floor((x_local / interval) * num_of_view);
+    choice = min(choice, num_of_view - 1.0);
+
+    // 原厂序：列镜像 + 行自下而上（视点0 -> 图集右下角）
+    float col_f = row_img_num - mod(choice, row_img_num) - 1.0;
+    float row_f = floor(choice / row_img_num);
+    // 自然序：视点0 -> 图集左上角，逐行排列
+    float col_n = mod(choice, row_img_num);
+    float row_n = (col_img_num - 1.0) - floor(choice / row_img_num);
+
+    float col_choice = mix(col_f, col_n, orderFlag);
+    float row_choice = mix(row_f, row_n, orderFlag);
+
+    vec2 reciprocals = vec2(1.0 / row_img_num, 1.0 / col_img_num);
+    return (vec2(col_choice, row_choice) + vec2(pos.x, pos.y + offsetY)) * reciprocals;
+}
+
+vec4 get_color(float bias){
+    return texture2D(tDiffuse, get_choice(vUV, bias));
+}
+
+void main(void){
+    vec4 color   = get_color(0.0);      // R
+    color.g      = get_color(1.0).g;    // G
+    color.b      = get_color(2.0).b;    // B
+    gl_FragColor = vec4(color.rgb, 1.0);
+}
+`;
+
+function compile(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+const aPos = gl.getAttribLocation(prog, "aPos");
+gl.enableVertexAttribArray(aPos);
+gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+const U = {};
+["tDiffuse","slope","interval","x0","offsetY","row_img_num","col_img_num",
+ "num_of_view","gridSizeX","gridSizeY","orderFlag"].forEach(
+  n => U[n] = gl.getUniformLocation(prog, n));
+
+/* -------- 模式B：实时深度视差（复刻 Any2C1 的 ViewMapCS + LenticularPS） --------
+   不依赖 40 宫格图集，直接由 RGB + 深度图合成光栅交织画面。
+   视点坐标与模式A同源：pitch=(W*3)/lineNumber，slope=obliquity*(H/W)，center=(x0+3)/lineNumber
+----------------------------------------------------------------------------- */
+const FS2 = `
+precision highp float;
+varying vec2 vUV;
+uniform sampler2D tColor;
+uniform sampler2D tDepth;
+uniform float slope;
+uniform float interval;
+uniform float x0;
+uniform float gridSizeX;
+uniform float gridSizeY;
+uniform float depthFactor;
+uniform float inverseDepth;
+uniform float inverseDisplay;
+uniform float gammaDepth;
+
+float sampleDepth(vec2 uv){
+    float d = texture2D(tDepth, uv).r;
+    if (gammaDepth > 0.5) d = clamp(d * 1.2 - 0.1, 0.0, 1.0);
+    if (inverseDepth > 0.5) d = 1.0 - d;
+    return d;
+}
+
+// su = 屏幕UV（y 自顶部起算），bias = 子像素序号 0/1/2
+float viewCoord(vec2 su, float bias){
+    float unit_subpix = 1.0 / (gridSizeX * 3.0);
+    float pitch  = (gridSizeX * 3.0) / interval;
+    float s      = slope * (gridSizeY / gridSizeX);
+    float center = (x0 + 3.0) / interval;
+    float v = su.x + su.y * s + bias * unit_subpix;
+    v = v * pitch + center;
+    v = mod(v, 1.0);
+    return 1.0 - v;
+}
+
+// Parallax Occlusion Mapping：沿深度做 16 步光线步进求横向采样偏移
+float findOffsetUV_X(vec2 uv, float viewOffset, float maxParallax){
+    float stepSize = 1.0 / 16.0;
+    float currentRayDepth = 1.0;
+    float currentUV_x = uv.x - viewOffset * 0.5 * maxParallax;
+    float uvDelta = viewOffset * maxParallax / 16.0;
+    float prevUV_x = currentUV_x;
+    float prevRayDepth = currentRayDepth;
+    float sampledDepth = sampleDepth(vec2(currentUV_x, uv.y));
+    float prevSampledDepth = sampledDepth;
+    for (int i = 0; i < 16; i++){
+        if (sampledDepth >= currentRayDepth) break;
+        prevUV_x = currentUV_x;
+        prevRayDepth = currentRayDepth;
+        prevSampledDepth = sampledDepth;
+        currentRayDepth -= stepSize;
+        currentUV_x += uvDelta;
+        sampledDepth = sampleDepth(vec2(currentUV_x, uv.y));
+    }
+    float d1 = prevRayDepth - prevSampledDepth;
+    float d2 = sampledDepth - currentRayDepth;
+    float weight = (d1 + d2) > 0.00001 ? d1 / (d1 + d2) : 0.0;
+    return clamp(mix(prevUV_x, currentUV_x, weight), 0.0, 1.0);
+}
+
+void main(void){
+    vec2 uv = vUV;
+    if (inverseDisplay > 0.5) uv = vec2(1.0 - uv.x, 1.0 - uv.y);
+    vec2 su = vec2(uv.x, 1.0 - uv.y);          // 屏幕UV：y 自顶
+
+    float maxParallax = 0.2 * depthFactor;
+    float oR = -(viewCoord(su, 0.0) - 0.5);
+    float oG = -(viewCoord(su, 1.0) - 0.5);
+    float oB = -(viewCoord(su, 2.0) - 0.5);
+
+    float xR = findOffsetUV_X(uv, oR, maxParallax);
+    float xG = findOffsetUV_X(uv, oG, maxParallax);
+    float xB = findOffsetUV_X(uv, oB, maxParallax);
+
+    vec3 c;
+    c.r = texture2D(tColor, vec2(xR, uv.y)).r;
+    c.g = texture2D(tColor, vec2(xG, uv.y)).g;
+    c.b = texture2D(tColor, vec2(xB, uv.y)).b;
+    gl_FragColor = vec4(c, 1.0);
+}
+`;
+
+const prog2 = gl.createProgram();
+gl.attachShader(prog2, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog2, compile(gl.FRAGMENT_SHADER, FS2));
+gl.linkProgram(prog2);
+if (!gl.getProgramParameter(prog2, gl.LINK_STATUS))
+  throw new Error(gl.getProgramInfoLog(prog2));
+
+const U2 = {};
+["tColor","tDepth","slope","interval","x0","gridSizeX","gridSizeY",
+ "depthFactor","inverseDepth","inverseDisplay","gammaDepth"].forEach(
+  n => U2[n] = gl.getUniformLocation(prog2, n));
+
+const tex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, tex);
+
+const depthTex = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, depthTex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+gl.bindTexture(gl.TEXTURE_2D, tex);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+// 与 three.js 保持一致：flipY=true -> v=1 对应图像顶部
+gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+gl.uniform1i(U.tDiffuse, 0);
+
+/* ------------------------------ 源 ------------------------------ */
+const video = document.createElement("video");
+video.muted = true; video.loop = true; video.playsInline = true;
+video.crossOrigin = "anonymous";
+let mode = "none";            // none | video | image | calib
+let imageBitmap = null;
+let videoReady = false;
+
+function setStatus(t){ document.getElementById("status").textContent = t; }
+
+function uploadVideoFrame(){
+  if (!videoReady) return;
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  try { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video); }
+  catch(e){}
+}
+
+function uploadImageObj(img, target){
+  gl.bindTexture(gl.TEXTURE_2D, target);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+}
+function uploadImage(src){
+  const img = new Image();
+  img.onload = () => {
+    imageBitmap = img;
+    uploadImageObj(img, tex);
+    mode = "image";
+    setStatus("图集 " + img.naturalWidth + "×" + img.naturalHeight);
+  };
+  img.src = src;
+}
+
+/* 校准图：把每个视点画成其索引的灰阶 + 角标色块 */
+function buildCalib(){
+  const cols = P.cols, rows = P.rows;
+  const vw = 540, vh = 960;
+  const c = document.createElement("canvas");
+  c.width = vw * cols; c.height = vh * rows;
+  const x = c.getContext("2d");
+  const total = cols * rows;
+  for (let r = 0; r < rows; r++){
+    for (let k = 0; k < cols; k++){
+      const idx = r * cols + k;
+      const g = Math.round(255 * idx / (total - 1));
+      x.fillStyle = `rgb(${g},${g},${g})`;
+      x.fillRect(k*vw, r*vh, vw, vh);
+      x.fillStyle = "#ff0000";
+      x.font = "bold 120px sans-serif";
+      x.fillText(String(idx), k*vw + 40, r*vh + 160);
+      x.fillStyle = idx % 2 ? "#00ff00" : "#0000ff";
+      x.fillRect(k*vw + 40, r*vh + vh - 200, 200, 120);
+    }
+  }
+  uploadImage(c.toDataURL("image/png"));
+  setStatus("校准图 " + c.width + "×" + c.height + "（共 " + total + " 视点）");
+}
+
+/* ---- D20_Dice 的 RGBD 并排格式：W×H 图，左半=RGB，右半=灰度深度 ---- */
+function loadRgbd(file){
+  const img = new Image();
+  img.onload = () => {
+    const W = img.naturalWidth, H = img.naturalHeight;
+    const half = Math.floor(W / 2);
+    const cr = document.createElement("canvas"); cr.width = half; cr.height = H;
+    cr.getContext("2d").drawImage(img, 0, 0, half, H, 0, 0, half, H);
+    const cd = document.createElement("canvas"); cd.width = half; cd.height = H;
+    cd.getContext("2d").drawImage(img, half, 0, half, H, 0, 0, half, H);
+    uploadImageObj(cr, tex);
+    uploadImageObj(cd, depthTex);
+    P.mode = "parallax";
+    document.getElementById("selMode").value = P.mode;
+    setStatus("RGBD 并排 " + W + "×" + H + " → 单视点 " + half + "×" + H
+              + "（左 RGB / 右 深度）");
+    URL.revokeObjectURL(img.src);
+  };
+  img.src = URL.createObjectURL(file);
+}
+
+/* ---- 校准画面：左绿 / 中白 / 右绿 三条水平条 ----
+   深度分别取 最远 / 零视差 / 最近，使两端绿条产生方向相反的横向漂移。
+   周期精确时，三条才在视觉上连成同一水平线。                        */
+let calibMode = false;
+function buildCalibScene(){
+  const vw = 540, vh = 960;
+  const cr = document.createElement("canvas"); cr.width = vw; cr.height = vh;
+  const x = cr.getContext("2d");
+  x.fillStyle = "#000000"; x.fillRect(0, 0, vw, vh);
+  const bw = Math.round(vw * 0.17), bh = 26;
+  const cy = Math.round(vh * 0.5), gap = Math.round(vw * 0.22);
+  const bars = [[gap, "#00ff00"], [vw / 2, "#ffffff"], [vw - gap, "#00ff00"]];
+  bars.forEach(([cx, col]) => {
+    x.fillStyle = col; x.fillRect(cx - bw / 2, cy - bh / 2, bw, bh);
+  });
+
+  const cd = document.createElement("canvas"); cd.width = vw; cd.height = vh;
+  const y = cd.getContext("2d");
+  y.fillStyle = "#808080"; y.fillRect(0, 0, vw, vh);          // 背景 = 零视差
+  y.fillStyle = "#000000"; y.fillRect(gap - bw / 2, cy - bh / 2, bw, bh);      // 最远
+  y.fillStyle = "#808080"; y.fillRect(vw / 2 - bw / 2, cy - bh / 2, bw, bh);   // 零视差
+  y.fillStyle = "#ffffff"; y.fillRect(vw - gap - bw / 2, cy - bh / 2, bw, bh); // 最近
+
+  uploadImageObj(cr, tex);
+  uploadImageObj(cd, depthTex);
+  P.mode = "parallax";
+  P.gammaDepth = 0;
+  P.depthFactor = 2.0;
+  document.getElementById("selMode").value = "parallax";
+  document.getElementById("sDepthF").value = P.depthFactor; syncDepthF();
+  document.getElementById("btnGamma").textContent = "深度预处理: 关";
+  calibMode = true;
+  updateDerived();
+  setStatus("校准模式：单眼正对屏幕中心，左右拖动鼠标微调周期");
+}
+
+/* 校准读数：算出左/右绿条当前的横向偏移（源图像素），供量化判读 */
+function calibOffsets(){
+  const W = P.outW, H = P.outH;
+  const pitch = (W * 3) / P.interval;
+  const s = P.slope * (H / W);
+  const center = (P.x0 + 3) / P.interval;
+  const maxPar = 0.2 * P.depthFactor;
+  const vw = 540, suy = 0.5;
+  const vc = (sux) => {
+    let v = (sux + suy * s) * pitch + center;
+    v = v - Math.floor(v);
+    return 1 - v;
+  };
+  const off = (sux, depth) => (-(vc(sux) - 0.5)) * maxPar * (0.5 - depth) * vw;
+  return { L: off(0.22, 0.0), R: off(0.78, 1.0) };
+}
+
+function updateDerived(){
+  const el = document.getElementById("derived");
+  if (!el) return;
+  const jiange = P.interval / 3;                       // 光栅周期，单位=物理像素
+  const cycles = (P.outW * 3) / P.interval;            // 屏幕宽含多少个周期
+  const ang = Math.atan(P.slope) * 180 / Math.PI;      // 物理像素空间的倾斜角
+  const angUV = Math.atan(P.slope * (P.outH / P.outW)) * 180 / Math.PI;
+  el.innerHTML =
+    "派生量：<code>jiange</code>(周期/物理像素) = <b>" + jiange.toFixed(4) + "</b>" +
+    " · 屏幕宽 <b>" + cycles.toFixed(2) + "</b> 个周期" +
+    " · 倾斜角 <b>" + ang.toFixed(3) + "°</b>（UV 空间 " + angUV.toFixed(3) + "°）" +
+    "<br>D20_Dice 内置默认值 jiange=6.5379 / obliquity=0.1011（未接管道时的回退值）";
+
+  // 1:1 像素校验：canvas 的物理像素必须恰好铺满屏幕像素，否则光栅相位整体错位
+  const fit = document.getElementById("pixelFit");
+  if (fit){
+    const r = canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const ex = Math.round(r.width * dpr), ey = Math.round(r.height * dpr);
+    const ok = Math.abs(ex - P.outW) <= 1 && Math.abs(ey - P.outH) <= 1;
+    fit.innerHTML = ok
+      ? "显示：<b style='color:#16a34a'>1:1</b>（CSS " + r.width.toFixed(1) + "×" + r.height.toFixed(1) +
+        " × dPR " + dpr + "）"
+      : "显示：<b style='color:#dc2626'>非 1:1</b>（CSS " + r.width.toFixed(1) + "×" + r.height.toFixed(1) +
+        " × dPR " + dpr + " → " + ex + "×" + ey + " 物理像素）— 相位会错位：请全屏并把副屏设为原生 " +
+        P.outW + "×" + P.outH;
+  }
+
+  if (calibMode){
+    const o = calibOffsets();
+    // ⚠️ 判据必须是“有符号和 L+R”：|L|-|R| 会同时命中的两个根里，
+    //    一个是真对称（L≈-R，两绿条分居白条两侧），另一个是退化解（同号，两绿条都偏同一侧）。
+    const sym = o.L + o.R;
+    const col = Math.abs(sym) < 1.5 ? "#4ade80" : "#fbbf24";
+    calibInfo.innerHTML =
+      "左绿条偏移 <b>" + o.L.toFixed(1) + " px</b> ｜ 右绿条偏移 <b>" + o.R.toFixed(1) +
+      " px</b> ｜ 偏移和 <b style='color:" + col + "'>" + sym.toFixed(1) + " px</b>" +
+      "<br>拖动鼠标使「偏移和」趋近 0（左负右正 = 两绿条分居白条两侧、到白条距离相等），然后点击确认。";
+  }
+}
+
+/* ------------------------------ 渲染 ------------------------------ */
+function resize(){
+  canvas.width = P.outW; canvas.height = P.outH;
+  gl.viewport(0, 0, P.outW, P.outH);
+  updateDerived();           // 1:1 指示随窗口/分辨率变化刷新
+}
+window.addEventListener("resize", updateDerived);
+resize();
+
+function draw(){
+  if (mode === "video") uploadVideoFrame();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(aPos);
+  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+
+  if (P.mode === "parallax"){
+    gl.useProgram(prog2);
+    gl.uniform1f(U2.slope, P.slope);
+    gl.uniform1f(U2.interval, P.interval);
+    gl.uniform1f(U2.x0, P.x0);
+    gl.uniform1f(U2.gridSizeX, P.outW);
+    gl.uniform1f(U2.gridSizeY, P.outH);
+    gl.uniform1f(U2.depthFactor, P.depthFactor);
+    gl.uniform1f(U2.inverseDepth, P.inverseDepth);
+    gl.uniform1f(U2.inverseDisplay, P.inverseDisplay);
+    gl.uniform1f(U2.gammaDepth, P.gammaDepth);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(U2.tColor, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, depthTex);
+    gl.uniform1i(U2.tDepth, 1);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.activeTexture(gl.TEXTURE0);
+    return;
+  }
+
+  gl.useProgram(prog);
+  gl.uniform1f(U.slope, P.slope);
+  gl.uniform1f(U.interval, P.interval);
+  gl.uniform1f(U.x0, P.x0);
+  gl.uniform1f(U.offsetY, P.offsetY);
+  gl.uniform1f(U.row_img_num, P.cols);
+  gl.uniform1f(U.col_img_num, P.rows);
+  gl.uniform1f(U.num_of_view, P.cols * P.rows);
+  gl.uniform1f(U.gridSizeX, P.outW);
+  gl.uniform1f(U.gridSizeY, P.outH);
+  gl.uniform1f(U.orderFlag, P.order === "natural" ? 1 : 0);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+}
+function loop(){ draw(); requestAnimationFrame(loop); }
+requestAnimationFrame(loop);
+
+/* ------------------------------ 参数 UI ------------------------------ */
+function bind(idS, idV, key, fmt){
+  const s = document.getElementById(idS), v = document.getElementById(idV);
+  s.value = P[key];
+  const sync = () => {
+    P[key] = parseFloat(s.value); v.textContent = fmt(P[key]);
+    updateDerived();
+  };
+  s.addEventListener("input", sync); sync();
+  return sync;
+}
+const syncInterval = bind("sInterval","vInterval","interval", x=>x.toFixed(4));
+const syncSlope    = bind("sSlope","vSlope","slope",        x=>x.toFixed(6));
+const syncX0       = bind("sX0","vX0","x0",                x=>x.toFixed(4));
+const syncOffsetY  = bind("sOffsetY","vOffsetY","offsetY",  x=>x.toFixed(4));
+const syncDisp     = bind("sDisp","vDisp","disparity",      x=>x.toFixed(1));
+const syncFocus    = bind("sFocus","vFocus","focus",        x=>x.toFixed(2));
+
+function refreshNum(){
+  document.getElementById("nCols").value = P.cols;
+  document.getElementById("nRows").value = P.rows;
+  document.getElementById("nViews").value = P.cols * P.rows;
+  document.getElementById("nOutW").value = P.outW;
+  document.getElementById("nOutH").value = P.outH;
+  document.getElementById("selOrder").value = P.order;
+  document.getElementById("selMode").value = P.mode;
+  updateDerived();
+}
+const syncDepthF = bind("sDepthF","vDepthF","depthFactor", x=>x.toFixed(2));
+document.getElementById("selMode").onchange = e => {
+  P.mode = e.target.value;
+  setStatus("模式 " + (P.mode === "quilt" ? "A：40宫格图集" : "B：RGB+深度实时视差"));
+};
+document.getElementById("btnInvD").onclick = e => {
+  P.inverseDepth = P.inverseDepth ? 0 : 1;
+  e.target.textContent = "深度反转: " + (P.inverseDepth ? "开" : "关");
+};
+document.getElementById("btnInvS").onclick = e => {
+  P.inverseDisplay = P.inverseDisplay ? 0 : 1;
+  e.target.textContent = "画面翻转: " + (P.inverseDisplay ? "开" : "关");
+};
+document.getElementById("btnGamma").onclick = e => {
+  P.gammaDepth = P.gammaDepth ? 0 : 1;
+  e.target.textContent = "深度预处理: " + (P.gammaDepth ? "开" : "关");
+};
+
+/* ---- 校准交互 ---- */
+const calibInfo = document.getElementById("calibInfo");
+function clamp(v, a, b){ return v < a ? a : (v > b ? b : v); }
+
+document.getElementById("btnRgbd").onclick = () => document.getElementById("fileRgbd").click();
+document.getElementById("fileRgbd").onchange = e => {
+  const f = e.target.files[0]; if (f) loadRgbd(f);
+};
+
+/* 自动求解：在出厂值 ±0.075 内扫出所有「左右不对称 = 0」的根，取离当前周期最近的一个。
+   与 calibOffsets 同一套公式，避免靠肉眼反复拖。 */
+function solveSymmetricInterval(){
+  const f = (interval) => {
+    const W = P.outW, H = P.outH;
+    const pitch = (W * 3) / interval, s = P.slope * (H / W);
+    const center = (P.x0 + 3) / interval, mp = 0.2 * P.depthFactor;
+    const vc = (sux, suy) => { let v = (sux + suy * s) * pitch + center; v -= Math.floor(v); return 1 - v; };
+    const off = (sux, depth) => (-(vc(sux, 0.5) - 0.5)) * mp * (0.5 - depth) * 540;
+    return off(0.22, 0) + off(0.78, 1);   // 有符号和：真对称根才为 0（|L|-|R| 会命中同号退化解）
+  };
+  const off2 = (interval) => {
+    const W = P.outW, H = P.outH;
+    const pitch = (W * 3) / interval, s = P.slope * (H / W);
+    const center = (P.x0 + 3) / interval, mp = 0.2 * P.depthFactor;
+    const vc = (sux) => { let v = (sux + 0.5 * s) * pitch + center; v -= Math.floor(v); return 1 - v; };
+    const o = (sux, depth) => (-(vc(sux) - 0.5)) * mp * (0.5 - depth) * 540;
+    return [o(0.22, 0), o(0.78, 1)];
+  };
+  const lo = DEVICE.lineNumber - 0.075, hi = DEVICE.lineNumber + 0.075, step = 0.0005;
+  const cands = [];
+  let px = lo, pv = f(lo);
+  for (let x = lo + step; x <= hi; x += step){
+    const cv = f(x);
+    if (pv * cv < 0){
+      const m = (px + x) / 2;
+      const [L, R] = off2(m);
+      // 相位 mod 回绕会造成假过零：只保留"两绿条反号且和≈0"的真对称根
+      if (Math.abs(L + R) < 5 && L * R < 0) cands.push({ m, s: Math.abs(L + R) });
+    }
+    px = x; pv = cv;
+  }
+  if (!cands.length) return null;
+  // |L+R| 最小者 = 真对称（同号退化解与近对称解都会被排除）
+  cands.sort((a, b) => a.s - b.s || Math.abs(a.m - P.interval) - Math.abs(b.m - P.interval));
+  return cands[0].m;
+}
+
+document.getElementById("btnCalibSolve").onclick = () => {
+  const r = solveSymmetricInterval();
+  if (r === null){ calibInfo.textContent = "在出厂值 ±0.075 内未找到对称解。"; return; }
+  P.interval = r;
+  const s = document.getElementById("sInterval");
+  s.value = P.interval; syncInterval(); updateDerived();
+  calibInfo.innerHTML = "已跳到最近的对称周期 <b>" + r.toFixed(4) +
+    "</b>（Δ " + (r - DEVICE.lineNumber).toFixed(4) + "，jiange " + (r / 3).toFixed(4) +
+    "）。再单眼确认三线是否共线，必要时 ±0.001 微调。";
+};
+
+document.getElementById("btnCalibStart").onclick = () => buildCalibScene();
+document.getElementById("btnCalibExit").onclick = () => {
+  calibMode = false;
+  calibInfo.textContent = "已退出校准画面。";
+  setStatus("已退出校准");
+};
+document.getElementById("btnCalibOk").onclick = () => {
+  const rec = {
+    interval: P.interval, jiange: P.interval / 3,
+    slope: P.slope, x0: P.x0, outW: P.outW, outH: P.outH,
+    ts: new Date().toISOString()
+  };
+  try { localStorage.setItem("companion01_calib", JSON.stringify(rec)); } catch(e){}
+  calibInfo.innerHTML =
+    "已校准：周期 <b>" + P.interval.toFixed(4) + "</b>（jiange " +
+    (P.interval / 3).toFixed(4) + "），已存入 localStorage。" +
+    "可用「导出参数」保存，或手动写入 <code>screen_params.json</code> 的 lineNumber。";
+  setStatus("校准完成 interval=" + P.interval.toFixed(4));
+};
+try {
+  const saved = JSON.parse(localStorage.getItem("companion01_calib") || "null");
+  if (saved){
+    calibInfo.innerHTML = "上次校准：周期 <b>" + saved.interval.toFixed(4) +
+      "</b>（" + new Date(saved.ts).toLocaleString() + "）";
+  }
+} catch(e){}
+
+/* 校准模式下：左右拖动鼠标 = 微调光栅周期（复刻 D20 的鼠标校准） */
+let dragX = null;
+canvas.addEventListener("mousedown", e => {
+  if (calibMode){ dragX = e.clientX; e.preventDefault(); }
+});
+window.addEventListener("mouseup", () => { dragX = null; });
+window.addEventListener("mousemove", e => {
+  if (dragX === null || !calibMode) return;
+  const dx = e.clientX - dragX; dragX = e.clientX;
+  // 搜索范围限定在出厂值 ±0.075：对称解每隔 ≈0.159 重复一次，限幅可保证唯一解
+  P.interval = clamp(P.interval + dx * 0.0002,
+                     DEVICE.lineNumber - 0.075, DEVICE.lineNumber + 0.075);
+  const s = document.getElementById("sInterval");
+  s.value = P.interval; syncInterval(); updateDerived();
+});
+
+refreshNum();
+document.getElementById("nCols").onchange = e => { P.cols = +e.target.value; refreshNum(); };
+document.getElementById("nRows").onchange = e => { P.rows = +e.target.value; refreshNum(); };
+document.getElementById("nOutW").onchange = e => { P.outW = +e.target.value; resize(); };
+document.getElementById("nOutH").onchange = e => { P.outH = +e.target.value; resize(); };
+document.getElementById("selOrder").onchange = e => { P.order = e.target.value; };
+
+document.getElementById("btnReset").onclick = () => {
+  P.interval = DEVICE.lineNumber; P.slope = DEVICE.obliquity; P.x0 = DEVICE.deviation;
+  P.offsetY = 0; P.cols = DEVICE.cols; P.rows = DEVICE.rows;
+  P.outW = DEVICE.outW; P.outH = DEVICE.outH; P.order = "factory";
+  document.getElementById("sInterval").value = P.interval; syncInterval();
+  document.getElementById("sSlope").value = P.slope;       syncSlope();
+  document.getElementById("sX0").value = P.x0;             syncX0();
+  document.getElementById("sOffsetY").value = P.offsetY;   syncOffsetY();
+  refreshNum(); resize();
+};
+document.getElementById("btnExport").onclick = () => {
+  const blob = new Blob([JSON.stringify(P, null, 2)], {type:"application/json"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob); a.download = "companion01_params.json"; a.click();
+};
+
+document.getElementById("btnVideo").onclick = () => document.getElementById("fileVideo").click();
+document.getElementById("btnImage").onclick = () => document.getElementById("fileImage").click();
+document.getElementById("fileVideo").onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  video.src = URL.createObjectURL(f);
+  video.onloadeddata = () => {
+    videoReady = true; mode = "video"; video.play();
+    setStatus("视频 " + video.videoWidth + "×" + video.videoHeight + " · " + f.name);
+    document.getElementById("srcInfo").textContent =
+      "视频 " + video.videoWidth + "×" + video.videoHeight + "：" + f.name;
+  };
+};
+document.getElementById("fileImage").onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  uploadImage(URL.createObjectURL(f));
+  document.getElementById("srcInfo").textContent = "图片：" + f.name;
+};
+document.getElementById("btnPlay").onclick = e => {
+  if (video.paused) { video.play(); e.target.textContent = "暂停"; }
+  else { video.pause(); e.target.textContent = "播放"; }
+};
+document.getElementById("btnLoop").onclick = e => {
+  video.loop = !video.loop; e.target.textContent = "循环: " + (video.loop ? "开" : "关");
+};
+document.getElementById("btnCalib").onclick = buildCalib;
+document.getElementById("btnSavePng").onclick = () => {
+  draw();
+  canvas.toBlob(b => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b); a.download = "interlaced_1440x2560.png"; a.click();
+  });
+};
+
+/* ------------------------------ 图集生成 ------------------------------ */
+let rgbImg = null, depthImg = null;
+
+function loadImg(file, cb){
+  const img = new Image();
+  img.onload = () => cb(img);
+  img.src = URL.createObjectURL(file);
+}
+document.getElementById("btnRgb").onclick   = () => document.getElementById("fileRgb").click();
+document.getElementById("btnDepth").onclick = () => document.getElementById("fileDepth").click();
+document.getElementById("fileRgb").onchange   = e => loadImg(e.target.files[0], i => {
+  rgbImg = i; uploadImageObj(i, tex); mode = "image";
+  setStatus("RGB " + i.naturalWidth + "×" + i.naturalHeight); });
+document.getElementById("fileDepth").onchange = e => loadImg(e.target.files[0], i => {
+  depthImg = i; uploadImageObj(i, depthTex);
+  setStatus("深度 " + i.naturalWidth + "×" + i.naturalHeight); });
+
+function makeQuilt(){
+  if (!rgbImg) { setStatus("请先选择 RGB 图"); return null; }
+  const cols = P.cols, rows = P.rows;
+  // 单视点分辨率 = 输出分辨率 × 3/8（1440×2560 -> 540×960）
+  const vw = Math.max(1, Math.round(P.outW * 3 / 8));
+  const vh = Math.max(1, Math.round(P.outH * 3 / 8));
+  const VW = vw * cols, VH = vh * rows;
+
+  const cSrc = document.createElement("canvas");
+  cSrc.width = vw; cSrc.height = vh;
+  const sx = cSrc.getContext("2d");
+  sx.drawImage(rgbImg, 0, 0, vw, vh);
+  const src = sx.getImageData(0, 0, vw, vh).data;
+
+  let dep = null;
+  if (depthImg){
+    const cd = document.createElement("canvas");
+    cd.width = vw; cd.height = vh;
+    const dx = cd.getContext("2d");
+    dx.drawImage(depthImg, 0, 0, vw, vh);
+    dep = dx.getImageData(0, 0, vw, vh).data;
+  }
+
+  const out = document.createElement("canvas");
+  out.width = VW; out.height = VH;
+  const ox = out.getContext("2d");
+  const dst = ox.createImageData(vw, vh);
+
+  const total = cols * rows;
+  const disp = P.disparity, focus = P.focus;
+
+  for (let r = 0; r < rows; r++){
+    for (let k = 0; k < cols; k++){
+      // 视点索引沿用「自然序」：图集左上为 0，逐行
+      const idx = r * cols + k;
+      // 归一化视角方向 [-0.5, 0.5]
+      const ax = (cols === 1) ? 0 : (k / (cols - 1) - 0.5);
+      const ay = (rows === 1) ? 0 : (r / (rows - 1) - 0.5);
+      const d = dst.data;
+      for (let y = 0; y < vh; y++){
+        for (let x = 0; x < vw; x++){
+          const o = (y * vw + x) * 4;
+          let shift = 0, shiftY = 0;
+          if (dep){
+            // 深度越亮越近；相对聚焦面的深度差驱动视差
+            const dv = (dep[o] * 0.299 + dep[o+1] * 0.587 + dep[o+2] * 0.114) / 255;
+            shift  = (dv - focus) * disp * ax * 2;
+            shiftY = (dv - focus) * disp * ay * 2 * 0.35;  // 垂直视差弱一些
+          } else {
+            shift = disp * ax;   // 无深度：整体平移，仅用于测试
+          }
+          let sx2 = Math.round(x - shift);
+          let sy2 = Math.round(y - shiftY);
+          if (sx2 < 0) sx2 = 0; else if (sx2 >= vw) sx2 = vw - 1;
+          if (sy2 < 0) sy2 = 0; else if (sy2 >= vh) sy2 = vh - 1;
+          const s = (sy2 * vw + sx2) * 4;
+          d[o] = src[s]; d[o+1] = src[s+1]; d[o+2] = src[s+2]; d[o+3] = 255;
+        }
+      }
+      ox.putImageData(dst, k * vw, r * vh);
+    }
+  }
+  setStatus("已生成图集 " + VW + "×" + VH + "（" + total + " 视点，单视点 " + vw + "×" + vh + "）");
+  return out;
+}
+
+document.getElementById("btnGen").onclick = () => {
+  const q = makeQuilt(); if (!q) return;
+  uploadImage(q.toDataURL("image/png"));
+  document.getElementById("srcInfo").textContent = "已生成图集并载入";
+};
+document.getElementById("btnGenPng").onclick = () => {
+  const q = makeQuilt(); if (!q) return;
+  q.toBlob(b => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(b); a.download = "quilt_40view.png"; a.click();
+  });
+};
+
+/* ------------------------------ 投屏 / 快捷键 ------------------------------ */
+const panel = document.getElementById("panel");
+document.getElementById("btnFull").onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen();
+};
+document.getElementById("btnFit").onclick = () => {
+  canvas.style.width = P.outW + "px"; canvas.style.height = P.outH + "px";
+  canvas.style.objectFit = "contain";
+  setStatus("1:1 映射 " + P.outW + "×" + P.outH);
+};
+document.getElementById("toggle").onclick = () => panel.classList.toggle("hidden");
+document.addEventListener("keydown", e => {
+  if (e.key === "h" || e.key === "H") panel.classList.toggle("hidden");
+  if (e.key === "f" || e.key === "F") document.getElementById("btnFull").click();
+});
+</script>
+</body>
+</html>

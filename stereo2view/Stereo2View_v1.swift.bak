@@ -1,0 +1,589 @@
+// Stereo2View — 把 SBS / TB 双目画面或 VR 视频转成 Companion-01 的二视点交织图
+// 用法: Stereo2View [--file <image|video>] [--layout sbs|tb|mono] [--deviation v]
+//                  [--zoom z] [--rshift px] [--dump out.png] [--autoclose s]
+import Cocoa
+import Metal
+import MetalKit
+import AVFoundation
+import CoreVideo
+
+let VW = 1440, VH = 2560
+let DEF_LINE: Float = 19.6349
+let DEF_OBL: Float = 0.103813
+let DEF_DEV: Float = 3.8456375
+
+struct P {
+    var W: Float = Float(VW), H: Float = Float(VH)
+    var obliquity: Float = DEF_OBL
+    var lineNumber: Float = DEF_LINE
+    var deviation: Float = DEF_DEV
+    var N: Float = 2
+    var swap: Float = 0
+    var layout: Float = 0          // 0=SBS 1=TB 2=mono
+    var zoom: Float = 1
+    var panX: Float = 0, panY: Float = 0
+    var rShift: Float = 0          // 右眼水平位移（源 uv 单位）
+    var flipY: Float = 1
+    var viewDist: Float = 0.7      // 观看距离（决定目标视场角）
+    var srcFOV: Float = 180        // 源水平视场角
+    var autoCrop: Float = 1
+    var eDisp: Float = 0           // 每眼水平缩放差（瞳距/视差补偿）
+    var projComp: Float = 0        // 投影补偿（径向）
+    var testMode: Float = 0        // 测试图（程序化视差靶）
+    var testDisp: Float = 0        // 测试视差（屏宽比例）
+}
+
+let msl = """
+#include <metal_stdlib>
+using namespace metal;
+
+struct P {
+    float W; float H;
+    float obliquity; float lineNumber; float deviation;
+    float N; float swap; float layout;
+    float zoom; float panX; float panY; float rShift; float flipY;
+    float viewDist; float srcFOV; float autoCrop; float eDisp; float projComp;
+    float testMode; float testDisp;
+};
+
+struct VOut { float4 pos [[position]]; float2 uv; };
+
+vertex VOut vmain(uint vid [[vertex_id]]) {
+    float2 p[3] = { float2(-1,-1), float2(3,-1), float2(-1,3) };
+    VOut o;
+    o.pos = float4(p[vid], 0, 1);
+    o.uv  = float2((p[vid].x + 1.0) * 0.5, 1.0 - (p[vid].y + 1.0) * 0.5);  // y 自上而下
+    return o;
+}
+
+fragment float4 fmain(VOut in [[stage_in]],
+                      constant P &p [[buffer(0)]],
+                      texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler sm(filter::linear, address::clamp_to_edge);
+    float2 px = in.uv * float2(p.W, p.H);
+    float X = px.x + 0.5;
+    float Y = px.y + 0.5;
+
+    float2 base = (in.uv - 0.5) / p.zoom + 0.5 + float2(p.panX, p.panY);
+    if (p.flipY > 0.5) base.y = 1.0 - base.y;
+
+    float3 outc = float3(0.0);
+    for (int ch = 0; ch < 3; ++ch) {
+        float x1 = (X + Y * p.obliquity) * 3.0 + float(ch);
+        float xl = fmod(x1 + p.deviation, p.lineNumber);
+        if (xl < 0.0) xl += p.lineNumber;
+        int choice = (int)clamp(floor(xl / p.lineNumber * p.N), 0.0, p.N - 1.0);
+        if (p.swap > 0.5) choice = int(p.N) - 1 - choice;
+
+        if (p.testMode > 0.5) {                    // 程序化视差靶：右眼整幅平移
+            float2 t = in.uv;
+            if (choice == 1) t.x += p.testDisp;
+            float bars = step(0.5, fract(t.x * 60.0));
+            float cross = (fabs(t.x - 0.5) < 0.0016 || fabs(t.y - 0.5) < 0.0010) ? 1.0 : 0.0;
+            outc[ch] = clamp(0.10 + bars * 0.62 + cross * 0.9, 0.0, 1.0);
+            continue;
+        }
+
+        // base 已是“单眼画面内 0..1 的坐标”，眼睛由 choice 决定，不要在这里取 fract
+        float2 loc = base;
+
+        // 投影补偿：以每眼画面中心为原点做径向重映射
+        if (fabs(p.projComp) > 0.0001) {
+            float2 c = loc - 0.5;
+            float r2 = dot(c, c) * 2.0;              // 角上 = 1
+            loc = 0.5 + c * (1.0 + p.projComp * r2);
+        }
+        // 瞳距/视差补偿：左右眼反向缩放
+        if (p.layout < 0.5)      loc.x = 0.5 + (loc.x - 0.5) * (choice == 0 ? 1.0 + p.eDisp : 1.0 - p.eDisp);
+        else if (p.layout < 1.5) loc.y = 0.5 + (loc.y - 0.5) * (choice == 0 ? 1.0 + p.eDisp : 1.0 - p.eDisp);
+
+        // 拼回全图 uv
+        float2 uv = loc;
+        if (p.layout < 0.5) {
+            uv.x = loc.x * 0.5 + (choice == 0 ? 0.0 : 0.5);
+            if (choice == 1) uv.x += p.rShift * 0.5;
+        } else if (p.layout < 1.5) {
+            uv.y = loc.y * 0.5 + (choice == 0 ? 0.0 : 0.5);
+            if (choice == 1) uv.y += p.rShift * 0.5;
+        }
+        outc[ch] = tex.sample(sm, uv)[ch];
+    }
+    return float4(outc, 1.0);
+}
+"""
+
+// MARK: - 渲染核心
+final class Core {
+    let dev: MTLDevice
+    let queue: MTLCommandQueue
+    var pipe: MTLRenderPipelineState!
+    var texCache: CVMetalTextureCache?
+    var srcTex: MTLTexture?
+    var params = P()
+
+    init?() {
+        guard let d = MTLCreateSystemDefaultDevice(), let q = d.makeCommandQueue() else { return nil }
+        dev = d; queue = q
+        do {
+            let lib = try d.makeLibrary(source: msl, options: nil)
+            let desc = MTLRenderPipelineDescriptor()
+            desc.vertexFunction = lib.makeFunction(name: "vmain")
+            desc.fragmentFunction = lib.makeFunction(name: "fmain")
+            desc.colorAttachments[0].pixelFormat = .bgra8Unorm
+            pipe = try d.makeRenderPipelineState(descriptor: desc)
+        } catch { FileHandle.standardError.write(("pipeline: \(error)\n").data(using:.utf8)!); return nil }
+        CVMetalTextureCacheCreate(nil, nil, d, nil, &texCache)
+    }
+
+    func setImage(_ url: URL) -> Bool {
+        guard let img = NSImage(contentsOf: url),
+              let cg = img.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return false }
+        let loader = MTKTextureLoader(device: dev)
+        guard let t = try? loader.newTexture(cgImage: cg, options: [
+            .SRGB: false, .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+            .textureStorageMode: NSNumber(value: MTLStorageMode.shared.rawValue)]) else { return false }
+        srcTex = t
+        params.flipY = 0                     // CGImage 自上而下
+        return true
+    }
+
+    func setPixelBuffer(_ pb: CVPixelBuffer) {
+        guard let cache = texCache else { return }
+        let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
+        var cvTex: CVMetalTexture?
+        let st = CVMetalTextureCacheCreateTextureFromImage(nil, cache, pb, nil,
+                                                          .bgra8Unorm, w, h, 0, &cvTex)
+        guard st == kCVReturnSuccess, let cvTex,
+              let t = CVMetalTextureGetTexture(cvTex) else { return }
+        srcTex = t
+        params.flipY = 0
+    }
+
+    func render(into pass: MTLRenderPassDescriptor, drawableSize: CGSize, aspect: CGFloat) {
+        guard let enc = queue.makeCommandBuffer()?.makeRenderCommandEncoder(descriptor: pass),
+              let tex = srcTex else { return }
+        params.W = Float(VW); params.H = Float(VH)
+        enc.setRenderPipelineState(pipe)
+        enc.setFragmentTexture(tex, index: 0)
+        enc.setFragmentBytes(&params, length: MemoryLayout<P>.stride, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        enc.endEncoding()
+        enc.endEncoding()   // 无操作，保持结构清晰
+    }
+}
+
+// MARK: - 面板视图（支持拖拽平移、滚轮缩放）
+final class PanelView: MTKView {
+    var onDrag: ((CGFloat, CGFloat) -> Void)?
+    var onScroll: ((CGFloat) -> Void)?
+    override var acceptsFirstResponder: Bool { true }
+    override func mouseDragged(with event: NSEvent) { onDrag?(event.deltaX, event.deltaY) }
+    override func scrollWheel(with event: NSEvent) {
+        onScroll?(event.hasPreciseScrollingDeltas ? event.scrollingDeltaY * 0.25 : event.scrollingDeltaY)
+    }
+}
+
+// MARK: - 应用
+final class App: NSObject, NSApplicationDelegate, MTKViewDelegate {
+    var core: Core!
+    var panelWin: NSWindow!
+    var panelView: MTKView!
+    var ctrlWin: NSWindow!
+    var player: AVPlayer?
+    var videoOut: AVPlayerItemVideoOutput?
+    var fileLabel: NSTextField!
+    var statusLabel: NSTextField!
+    var sliders: [String: NSSlider] = [:]
+    var fields: [String: NSTextField] = [:]
+    var autoclose: Double = 0
+    var dumpPath: String?
+    var startTime = Date()
+    var ipdMM: Float = 63
+    var dispGain: Float = 1.0
+
+    func applicationDidFinishLaunching(_ n: Notification) {
+        guard let c = Core() else { FileHandle.standardError.write("Core init nil\n".data(using:.utf8)!); exit(2) }
+        core = c
+        buildPanel()
+        buildControls()
+        parseArgs()
+        if core.srcTex == nil { loadTestPattern() }
+        recalcCrop()
+        updateDisp()
+        NSApp.activate(ignoringOtherApps: true)
+        if dumpPath != nil { DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { self.dump() } }
+        if autoclose > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + autoclose) { NSApp.terminate(nil) }
+        }
+    }
+
+    // MARK: 窗口
+    func buildPanel() {
+        let scr = NSScreen.screens.first { Int($0.frame.height) == VH && Int($0.frame.width) == VW }
+            ?? NSScreen.screens.first { Int($0.frame.width) == VW }
+            ?? NSScreen.main!
+        let f = scr.frame
+        panelWin = NSWindow(contentRect: f, styleMask: [.borderless], backing: .buffered, defer: false, screen: scr)
+        panelWin.setFrame(f, display: true)
+        panelWin.level = .normal
+        panelWin.backgroundColor = .black
+        panelWin.isOpaque = true
+        panelWin.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        let v = PanelView(frame: NSRect(origin: .zero, size: f.size), device: core.dev)
+        v.onDrag = { [weak self] dx, dy in
+            guard let self else { return }
+            let z = Double(self.core.params.zoom)
+            self.core.params.panX -= Float(Double(dx) / Double(VW) / z)
+            self.core.params.panY += Float(Double(dy) / Double(VH) / z)
+            self.updateInfo()
+        }
+        v.onScroll = { [weak self] dy in
+            guard let self else { return }
+            let z = Double(self.core.params.zoom) * exp(Double(dy) * 0.02)
+            self.core.params.zoom = Float(max(0.4, min(60, z)))
+            self.core.params.autoCrop = 0
+            self.sliders["缩放"]?.doubleValue = Double(self.core.params.zoom)
+            self.fields["缩放"]?.stringValue = String(format: "%.2f", self.core.params.zoom)
+            self.updateInfo()
+        }
+        v.colorPixelFormat = .bgra8Unorm
+        v.clearColor = MTLClearColorMake(0, 0, 0, 1)
+        v.delegate = self
+        v.preferredFramesPerSecond = 60
+        v.isPaused = false
+        v.enableSetNeedsDisplay = false
+        panelView = v
+        panelWin.contentView = v
+        panelWin.ignoresMouseEvents = false
+        panelWin.acceptsMouseMovedEvents = true
+        panelWin.makeKeyAndOrderFront(nil)
+        panelWin.orderFrontRegardless()
+        let opt = NSTrackingArea.Options(rawValue: 0)
+        _ = opt
+    }
+
+    func buildControls() {
+        ctrlWin = NSWindow(contentRect: NSRect(x: 80, y: 200, width: 360, height: 470),
+                           styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        ctrlWin.title = "Stereo2View · 二视点"
+        ctrlWin.level = .floating
+        let root = NSView(frame: ctrlWin.contentView!.bounds)
+        ctrlWin.contentView = root
+
+        var y = 430.0
+        func add(_ v: NSView) { root.addSubview(v) }
+
+        let open = NSButton(title: "打开图像/视频…", target: self, action: #selector(openFile))
+        open.frame = NSRect(x: 12, y: y, width: 336, height: 30); add(open); y -= 36
+
+        fileLabel = NSTextField(labelWithString: "（未载入）")
+        fileLabel.frame = NSRect(x: 12, y: y, width: 336, height: 18)
+        fileLabel.font = .systemFont(ofSize: 11); fileLabel.lineBreakMode = .byTruncatingMiddle
+        add(fileLabel); y -= 26
+
+        let pop = NSPopUpButton(frame: NSRect(x: 12, y: y, width: 120, height: 26), pullsDown: false)
+        pop.addItems(withTitles: ["SBS 左右", "TB 上下", "单眼"])
+        pop.target = self; pop.action = #selector(layoutChanged(_:))
+        add(pop)
+        let swap = NSButton(checkboxWithTitle: "交换左右", target: self, action: #selector(toggleSwap(_:)))
+        swap.frame = NSRect(x: 150, y: y + 3, width: 110, height: 20); add(swap)
+        let play = NSButton(title: "播放/暂停", target: self, action: #selector(togglePlay))
+        play.frame = NSRect(x: 258, y: y, width: 90, height: 26); add(play)
+        y -= 36
+
+        func slider(_ name: String, _ lo: Double, _ hi: Double, _ v: Double, _ fmt: String) {
+            let l = NSTextField(labelWithString: name)
+            l.frame = NSRect(x: 12, y: y, width: 64, height: 18); l.font = .systemFont(ofSize: 11)
+            add(l)
+            let s = NSSlider(value: v, minValue: lo, maxValue: hi, target: self, action: #selector(sliderMoved(_:)))
+            s.identifier = NSUserInterfaceItemIdentifier(name)
+            s.frame = NSRect(x: 78, y: y - 2, width: 220, height: 24)
+            add(s); sliders[name] = s
+            let f = NSTextField(string: String(format: fmt, v))
+            f.frame = NSRect(x: 302, y: y - 2, width: 46, height: 22)
+            f.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            f.alignment = .right
+            f.target = self; f.action = #selector(fieldChanged(_:))
+            f.identifier = NSUserInterfaceItemIdentifier(name)
+            add(f); fields[name] = f
+            y -= 30
+        }
+        slider("相位", 0, 40, Double(DEF_DEV), "%.3f")
+        slider("观看距离", 0.3, 1.2, 0.7, "%.2f")
+        slider("源FOV", 20, 200, 180, "%.0f")
+        slider("源瞳距", 45, 85, 63, "%.0f")
+        slider("视差强度", 0.2, 3.0, 1.0, "%.2f")
+        slider("投影补偿", -1.0, 1.0, 0.0, "%.2f")
+        slider("测试视差px", 0, 160, 20, "%.0f")
+
+        let tBtn = NSButton(checkboxWithTitle: "测试图（竖条靶）", target: self, action: #selector(toggleTest(_:)))
+        tBtn.frame = NSRect(x: 150, y: y + 6, width: 180, height: 20)
+        add(tBtn); y -= 28
+        slider("缩放", 0.4, 12, 1.0, "%.2f")
+        slider("水平", -0.5, 0.5, 0, "%.3f")
+        slider("垂直", -0.5, 0.5, 0, "%.3f")
+        slider("右眼位移", -60, 60, 0, "%.0f")
+
+        statusLabel = NSTextField(labelWithString: "相位：0 = 分界线在 x=0；调它把分界对到两眼之间")
+        statusLabel.frame = NSRect(x: 12, y: 40, width: 336, height: 40)
+        statusLabel.font = .systemFont(ofSize: 10); statusLabel.textColor = .secondaryLabelColor
+        statusLabel.maximumNumberOfLines = 3
+        add(statusLabel)
+
+        let quit = NSButton(title: "退出", target: self, action: #selector(doQuit))
+        quit.frame = NSRect(x: 12, y: 8, width: 70, height: 26); add(quit)
+
+        ctrlWin.makeKeyAndOrderFront(nil)
+        ctrlWin.orderFrontRegardless()
+    }
+
+    // MARK: 参数
+    func parseArgs() {
+        let a = CommandLine.arguments
+        var i = 1
+        while i < a.count {
+            let k = a[i]
+            func val() -> String? { i + 1 < a.count ? a[i + 1] : nil }
+            switch k {
+            case "--file":
+                if let p = val() { _ = load(path: p) }; i += 2
+            case "--layout":
+                if let v = val() { core.params.layout = (v == "tb") ? 1 : (v == "mono" ? 2 : 0) }; i += 2
+            case "--deviation":
+                if let v = val(), let d = Double(v) { core.params.deviation = Float(d) }; i += 2
+            case "--viewdist":
+                if let v = val(), let d = Double(v) { core.params.viewDist = Float(d) }; i += 2
+            case "--test": core.params.testMode = 1; i += 1
+            case "--testdisp":
+                if let v = val(), let d = Double(v) { core.params.testDisp = Float(d) / Float(VW) }; i += 2
+            case "--ipd":
+                if let v = val(), let d = Double(v) { ipdMM = Float(d); updateDisp() }; i += 2
+            case "--gain":
+                if let v = val(), let d = Double(v) { dispGain = Float(d); updateDisp() }; i += 2
+            case "--projcomp":
+                if let v = val(), let d = Double(v) { core.params.projComp = Float(d) }; i += 2
+            case "--srcfov":
+                if let v = val(), let d = Double(v) { core.params.srcFOV = Float(d) }; i += 2
+            case "--zoom":
+                if let v = val(), let d = Double(v) { core.params.zoom = Float(d); core.params.autoCrop = 0 }; i += 2
+            case "--rshift":
+                if let v = val(), let d = Double(v) { core.params.rShift = Float(d) / Float(VW) * 2 }; i += 2
+            case "--swap": core.params.swap = 1; i += 1
+            case "--dump":
+                if let v = val() { dumpPath = v }; i += 2
+            case "--autoclose":
+                if let v = val(), let d = Double(v) { autoclose = d }; i += 2
+            default: i += 1
+            }
+        }
+    }
+
+    @objc func openFile() {
+        let p = NSOpenPanel()
+        p.allowedFileTypes = ["png", "jpg", "jpeg", "heic", "mp4", "mov", "m4v"]
+        if p.runModal() == .OK, let u = p.url { _ = load(path: u.path) }
+    }
+
+    func load(path: String) -> Bool {
+        let url = URL(fileURLWithPath: path)
+        let ext = url.pathExtension.lowercased()
+        let isVideo = ["mp4", "mov", "m4v"].contains(ext)
+        if isVideo {
+            let item = AVPlayerItem(url: url)
+            let out = AVPlayerItemVideoOutput(pixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:] as CFDictionary])
+            item.add(out)
+            videoOut = out
+            player = AVPlayer(playerItem: item)
+            player?.play()
+            core.srcTex = nil
+        } else {
+            guard core.setImage(url) else { statusLabel.stringValue = "图像载入失败"; return false }
+            player?.pause(); player = nil; videoOut = nil
+        }
+        fileLabel.stringValue = url.lastPathComponent
+        return true
+    }
+
+    func loadTestPattern() {
+        // 生成一张 SBS 测试图：左半红方块偏左，右半同方块偏右（交叉视差 → 出屏）
+        let w = 1080, h = 960
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: cs, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.setFillColor(NSColor(white: 0.08, alpha: 1).cgColor); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        for eye in 0..<2 {
+            let base = CGFloat(eye) * 540
+            ctx.setFillColor(NSColor(red: 0.9, green: 0.35, blue: 0.3, alpha: 1).cgColor)
+            let dx: CGFloat = eye == 0 ? 8 : -8
+            ctx.fill(CGRect(x: base + 270 - 60 + dx, y: 380, width: 120, height: 200))
+            ctx.setFillColor(NSColor(red: 0.35, green: 0.75, blue: 0.95, alpha: 1).cgColor)
+            ctx.fill(CGRect(x: base + 60, y: 700, width: 60, height: 60))
+            ctx.setStrokeColor(NSColor(white: 0.9, alpha: 1).cgColor); ctx.setLineWidth(4)
+            ctx.stroke(CGRect(x: base + 8, y: 8, width: 524, height: 944))
+        }
+        let cg = ctx.makeImage()!
+        let loader = MTKTextureLoader(device: core.dev)
+        if let t = try? loader.newTexture(cgImage: cg, options: [.SRGB: false,
+            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+            .textureStorageMode: NSNumber(value: MTLStorageMode.shared.rawValue)]) {
+            core.srcTex = t
+            core.params.flipY = 0
+            fileLabel.stringValue = "内置测试图（SBS，红块出屏）"
+        }
+    }
+
+    // MARK: 交互
+    @objc func layoutChanged(_ s: NSPopUpButton) { core.params.layout = Float(s.indexOfSelectedItem) }
+    @objc func toggleTest(_ b: NSButton) { core.params.testMode = b.state == .on ? 1 : 0 }
+    @objc func toggleSwap(_ b: NSButton) { core.params.swap = b.state == .on ? 1 : 0 }
+    @objc func togglePlay() {
+        guard let p = player else { return }
+        if p.rate > 0 { p.pause() } else { p.play() }
+    }
+    @objc func sliderMoved(_ s: NSSlider) {
+        guard let name = s.identifier?.rawValue else { return }
+        apply(name, s.doubleValue)
+        fields[name]?.stringValue = name == "右眼位移" ? String(format: "%.0f", s.doubleValue)
+                                                       : String(format: name == "相位" ? "%.3f" : "%.3f", s.doubleValue)
+    }
+    @objc func fieldChanged(_ f: NSTextField) {
+        guard let name = f.identifier?.rawValue, let v = Double(f.stringValue) else { return }
+        apply(name, v)
+        sliders[name]?.doubleValue = v
+    }
+    func apply(_ name: String, _ v: Double) {
+        switch name {
+        case "相位": core.params.deviation = Float(v)
+        case "观看距离":
+            core.params.viewDist = Float(v); recalcCrop()
+        case "源FOV":
+            core.params.srcFOV = Float(v); recalcCrop()
+        case "源瞳距": ipdMM = Float(v); updateDisp()
+        case "视差强度": dispGain = Float(v); updateDisp()
+        case "投影补偿": core.params.projComp = Float(v); updateInfo()
+        case "测试视差px": core.params.testDisp = Float(v) / Float(VW); updateInfo()
+        case "缩放":
+            core.params.zoom = Float(v)
+            core.params.autoCrop = 0
+            sliders["缩放"]?.doubleValue = v
+            updateInfo()
+        case "水平": core.params.panX = Float(v)
+        case "垂直": core.params.panY = Float(v)
+        case "右眼位移": core.params.rShift = Float(v) / Float(VW) * 2
+        default: break
+        }
+    }
+    func targetFOV() -> Double {
+        return 2 * atan(0.0355 / Double(core.params.viewDist)) * 180 / .pi
+    }
+
+    func recalcCrop() {
+        guard core.params.autoCrop > 0.5 else { updateInfo(); return }
+        let z = Double(core.params.srcFOV) / targetFOV()
+        core.params.zoom = Float(max(0.4, min(60, z)))
+        sliders["缩放"]?.doubleValue = Double(core.params.zoom)
+        fields["缩放"]?.stringValue = String(format: "%.2f", core.params.zoom)
+        updateInfo()
+    }
+
+    func updateDisp() {
+        let ratio = 63.0 / Double(max(1, ipdMM))          // 源瞳距 -> 面板瞳距
+        let e = (ratio * Double(dispGain) - 1.0) * 0.5
+        core.params.eDisp = Float(max(-0.30, min(0.30, e)))
+        updateInfo()
+    }
+
+    func updateInfo() {
+        let t = targetFOV()
+        let crop = Double(core.params.srcFOV) / Double(core.params.zoom)
+        var eff = 0.0
+        if let tex = core.srcTex {
+            let half = core.params.layout < 1.5 ? Double(tex.width) * 0.5 : Double(tex.width)
+            eff = half * crop / Double(core.params.srcFOV)
+        }
+        let up = eff > 0 ? 1440.0 / eff : 0
+        statusLabel.stringValue = String(format:
+            "目标视场 %.2f° (D=%.2fm) · 裁切 %.1f° · 有效宽 %.0fpx → 放大 %.1f× · 瞳距补偿 %+.1f%% · 投影 %+.2f · 拖拽=平移 滚轮=缩放",
+            t, Double(core.params.viewDist), crop, eff, up,
+            Double(core.params.eDisp) * 100, Double(core.params.projComp))
+    }
+
+    @objc func doQuit() { NSApp.terminate(nil) }
+
+    // MARK: 绘制
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+
+    func draw(in view: MTKView) {
+        if let out = videoOut, let p = player {
+            let t = p.currentTime()
+            if let pb = out.copyPixelBuffer(forItemTime: t, itemTimeForDisplay: nil) { core.setPixelBuffer(pb) }
+        }
+        guard let pass = view.currentRenderPassDescriptor,
+              let cmd = core.queue.makeCommandBuffer(),
+              let enc = cmd.makeRenderCommandEncoder(descriptor: pass) else { return }
+        if let tex = core.srcTex {
+            enc.setRenderPipelineState(core.pipe)
+            enc.setFragmentTexture(tex, index: 0)
+            var pp = core.params
+            enc.setFragmentBytes(&pp, length: MemoryLayout<P>.stride, index: 0)
+            enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        }
+        enc.endEncoding()
+        if let d = view.currentDrawable { cmd.present(d) }
+        cmd.commit()
+    }
+
+    // MARK: 导出
+    func dump() {
+        guard let path = dumpPath, let tex = core.srcTex else { NSApp.terminate(nil); return }
+        let d = core.dev
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: VW, height: VH, mipmapped: false)
+        td.usage = [.renderTarget, .shaderRead]
+        td.storageMode = .managed
+        guard let rt = d.makeTexture(descriptor: td) else { NSApp.terminate(nil); return }
+        let pass = MTLRenderPassDescriptor()
+        pass.colorAttachments[0].texture = rt
+        pass.colorAttachments[0].loadAction = .clear
+        pass.colorAttachments[0].storeAction = .store
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
+        let cmd = core.queue.makeCommandBuffer()!
+        let enc = cmd.makeRenderCommandEncoder(descriptor: pass)!
+        enc.setRenderPipelineState(core.pipe)
+        enc.setFragmentTexture(tex, index: 0)
+        var pp = core.params
+        enc.setFragmentBytes(&pp, length: MemoryLayout<P>.stride, index: 0)
+        enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+        enc.endEncoding()
+        let blit = cmd.makeBlitCommandEncoder()!
+        blit.synchronize(resource: rt)
+        blit.endEncoding()
+        cmd.commit(); cmd.waitUntilCompleted()
+
+        let bytes = VW * VH * 4
+        var buf = [UInt8](repeating: 0, count: bytes)
+        rt.getBytes(&buf, bytesPerRow: VW * 4, from: MTLRegionMake2D(0, 0, VW, VH), mipmapLevel: 0)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let cg = buf.withUnsafeMutableBytes { ptr -> CGImage? in
+            CGContext(data: ptr.baseAddress, width: VW, height: VH, bitsPerComponent: 8,
+                      bytesPerRow: VW * 4, space: cs,
+                      bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)?
+                .makeImage()
+        }
+        if let cg {
+            let rep = NSBitmapImageRep(cgImage: cg)
+            if let png = rep.representation(using: .png, properties: [:]) {
+                try? png.write(to: URL(fileURLWithPath: path))
+                print("dumped \(path)")
+            }
+        }
+        NSApp.terminate(nil)
+    }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.regular)
+let delegate = App()
+app.delegate = delegate
+app.run()
