@@ -176,7 +176,8 @@ fragment float4 qfrag(QOut in [[stage_in]], constant IU& u [[buffer(0)]],
         // 人眼对色度只有 1/4 的空间分辨率：亮度保留各子像素的严格定向，色度向中心视点收敛
         float lumaSub = dot(rgb, float3(0.299, 0.587, 0.114));
         float lumaCen = dot(centerRGB, float3(0.299, 0.587, 0.114));
-        float3 aligned = clamp(centerRGB + (lumaSub - lumaCen), 0.0, 1.0);
+        float lumaDiff = clamp(lumaSub - lumaCen, -0.10, 0.10);   // 限幅：抑制旋转时的边缘闪烁
+        float3 aligned = clamp(centerRGB + lumaDiff, 0.0, 1.0);
         rgb = mix(rgb, aligned, 0.70);
     }
     return float4(rgb, 1.0);
@@ -399,10 +400,11 @@ final class Renderer {
     var budgetPct: Float = 20.0                  // 内部安全上限（一般不再由用户调）
     var popCM: Float = 1.5                       // ★ 目标出屏距离（cm）
     var extreme = false                          // 极限模式：放宽单格角/扇形角上限
-    var rlMul: Float = 1.0                       // 瑞利锁倍率（立体强度，1.0 = 6.5px/步）
+    var rlMul: Float = 1.8
+    var focusSlice: Float = -0.25                  // 零视差面位置（模型半径的倍数）                       // 瑞利锁倍率（立体强度，1.0 = 6.5px/步）
     var useIPD = false
     var ipdMM: Float = 63
-    var zoneDeg: Float = 90.0
+    var zoneDeg: Float = 40.0
     var viewDist: Float = 0.7
     var bands = false
     var needsQuilt = true
@@ -511,7 +513,13 @@ final class Renderer {
         let maxDim = max(size.x, max(size.y, size.z))
         modelDepthNorm = maxDim > 0 ? size.z / maxDim : 0.8
         let scl = maxDim > 0 ? 1.0 / maxDim : 1
-        let center = (lo + hi) * 0.5
+        _ = (lo, hi)
+        // 中位数质心：雕刻模型常一侧顶点密集，AABB 中心会让旋转枢轴明显偏心
+        var mx = [Float](), my = [Float](), mz = [Float]()
+        mx.reserveCapacity(p.count); my.reserveCapacity(p.count); mz.reserveCapacity(p.count)
+        for q in p { mx.append(q.x); my.append(q.y); mz.append(q.z) }
+        mx.sort(); my.sort(); mz.sort()
+        let center = SIMD3<Float>(mx[mx.count/2], my[my.count/2], mz[mz.count/2])
 
         var nrm = [SIMD3<Float>](repeating: .zero, count: p.count)
         var i = 0
@@ -587,6 +595,10 @@ final class Renderer {
         // 各向同性半径（三轴中位数）→ 相机基线恒定，保证刚体旋转
         let sorted = [modelRadii.x, modelRadii.y, modelRadii.z].sorted()
         let rIso  = max(0.02, sorted[1] * modelScale)
+        let rBoundRaw = max(rIso, max(modelRadii.x, max(modelRadii.y, modelRadii.z)) * modelScale)
+        // 零视差面深度：focusSlice 以模型半径为尺度（-0.25 = 稍前于模型中心）
+        let dZero = max(0.05, d + focusSlice * rBoundRaw)
+        let halfW_zero = dZero * Tan
         // 视线投影半径 → 只用于安全上限
         let rProj = max(0.02, length(SIMD3(modelRadii.x * fwd.x,
                                            modelRadii.y * fwd.y,
@@ -635,26 +647,24 @@ final class Renderer {
             let maxStepShift: Float = (extreme ? 0.028 : 0.009) * rlMul
             // 每步"净位移" = 体积梯度 − 中心深度梯度（两者在 shift 里相减）
             // 只对净位移施加上限，保持体积/中心的比例不变
-            let rawVolStep = Float(2.0 * Double(effVol) / cells) * perspComp
-            let rawCenStep = Float(2.0 * Double(effCen) / cells)
-            let residual = abs(rawVolStep - rawCenStep)
-            // 软饱和（tanh）而不是硬夹断：缩放/旋转时视差连续变化，不会在阈值处跳变闪烁
-            let softRes = maxStepShift * tanh(residual / maxStepShift)
-            let rScale = residual > 1e-6 ? softRes / residual : 1.0
-            rayleighHit = rScale < 0.97
-            let stepShift = rawVolStep * rScale
+            // 体积步长：软饱和（tanh）后连续，不再硬夹断
+            let rawStepShift = Float(2.0 * Double(effVol) / cells) * perspComp
+            let stepShift = maxStepShift * tanh(rawStepShift / maxStepShift)
+            rayleighHit = stepShift < rawStepShift * 0.97
             let stepVol = stepShift / perspComp
+            _ = effCen
             effVolTot = effVol; stepVolDbg = stepVol
-            let stepCen = rawCenStep * rScale
+            let stepCen: Float = 0          // 中心深度改由 dZero/halfW_zero 承担，不占体积预算
             let unitIdx = Float(i) / Float(max(1, n - 1)) - 0.5
             off = unitIdx * n1F * stepShift * halfW_d                       // 差模：体积（已是屏幕量）
             // 共模：旋转/缩放恒定的中心深度（与 off 同乘 unitIdx，否则只是 2D 横移）
             // 符号：让 centerCM 为负（入屏）时零视差面朝前表面移动（实测标定：-0.35cm → 前 1/3）
             centerShift = -unitIdx * n1F * stepCen
             if i == 0 {
-                dbgShiftMin = -0.5 * n1F * (stepShift - stepCen)     // i=0 端的 shift
-                dbgShiftMax =  0.5 * n1F * (stepShift - stepCen)     // i=N-1 端
-                dbgStepPx = residual * rScale * 720.0
+                let r = halfW_d / halfW_zero
+                dbgShiftMin =  0.5 * n1F * stepShift * r
+                dbgShiftMax = -0.5 * n1F * stepShift * r
+                dbgStepPx = stepShift * 720.0
             }
         }
         if dbgLastN != Float(n) {
@@ -665,7 +675,7 @@ final class Renderer {
         }
 
         // ★ 符号：proj 第 3 列乘 z_view（前方为负），必须取负才能抵消相机横移
-        var shift = -off / max(1e-6, halfW_d) - centerShift
+        var shift = -off / max(1e-6, halfW_zero) - centerShift
         shift = max(-6.0, min(6.0, shift))      // 符号已正确，剪切只受显式上限约束
         let proj = perspective(fovy: vfov, aspect: aspect, near: 0.02, far: 60, shiftNDC: shift)
 
@@ -699,10 +709,23 @@ final class Renderer {
         }
     }
 
+    var requestRedraw: (() -> Void)?
+    var dragUntil: CFTimeInterval = 0
+    var isDragging: Bool { CACurrentMediaTime() < dragUntil }
+    func noteInteraction() {
+        dragUntil = CACurrentMediaTime() + 0.28
+        needsQuilt = true
+        Timer.scheduledTimer(withTimeInterval: 0.35, repeats: false) { [weak self] _ in
+            self?.needsQuilt = true
+            self?.requestRedraw?()
+        }
+    }
+
     func renderQuilt(_ cb: MTLCommandBuffer) {
         if !needsQuilt { return }
         needsQuilt = false
-        let m = max(1, min(views, every))
+        // 拖动/缩放时每帧只渲 1/4 相机（5 台），停手后自动补一帧满视点
+        let m = max(1, min(views, isDragging ? max(every, 4) : every))
         let camCount = (views + m - 1) / m
         let cols = camCount <= 8 ? camCount : 8
         let rows = (camCount + cols - 1) / cols
@@ -1418,6 +1441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
     }
 
     func wireNav(_ v: NavView) {
+        renderer.requestRedraw = { [weak self] in self?.markDirty() }
         v.onOrbit = { [weak self] dx, dy in
             guard let r = self?.renderer else { return }
             let sgn: Float = (self?.dragInvert ?? true) ? -1 : 1
@@ -1426,6 +1450,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
             // 越过极点时翻转 yaw 并镜像 pitch → 角度无上限，可连续翻过顶/底
             if r.pitch > 1.562 { r.pitch = Float.pi - r.pitch; r.yaw += .pi }
             if r.pitch < -1.562 { r.pitch = -Float.pi - r.pitch; r.yaw += .pi }
+            r.noteInteraction()
             self?.markDirty()
         }
         v.onPan = { [weak self] dx, dy in
@@ -1433,6 +1458,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
             let k = 0.0050 * r.dist
             r.panX -= Float(dx) * k          // 抓住物体：拖动方向与画面移动同向
             r.panY += Float(dy) * k
+            r.noteInteraction()
             self?.markDirty()
         }
         v.onZoomPrecise = { [weak self] dy, precise in
@@ -1440,6 +1466,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
             let k: Float = precise ? 0.010 : 0.040
             let step = max(-25.0, min(25.0, Float(dy)))          // 单次事件限幅，防止猛跳
             r.dist = min(10.0, max(0.03, r.dist * exp(-step * k)))
+            r.noteInteraction()
             self?.markDirty()
         }
     }
