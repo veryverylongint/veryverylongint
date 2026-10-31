@@ -565,6 +565,7 @@ final class Renderer {
         dist = 1.0 / (0.65 * 2 * tan(vfov / 2))
         fitDist = dist
         panX = 0; panY = 0
+        rotQ = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))   // 模型一律正对载入
         return "\(gozName)  \(p.count) 点 / \(gozIdx.count/3) 三角" + (hasCol ? " · 顶点色" : "")
     }
 
@@ -681,7 +682,8 @@ final class Renderer {
             // 瑞利硬锁：相邻视点的屏幕位移 ≤ 0.45% 屏宽（≈6.5 px = 1 个透镜周期）
             // 超出则单眼会看到"分离的硬边"而非"柔化边缘"
             // 常态 = 瑞利无重影锁 0.45% 屏宽；极限模式放宽 3.1 倍（立体更强、接受重影）
-            let maxStepShift: Float = (extreme ? 0.028 : 0.009) * rlMul
+            // 上限只做"极端保护"，常态下不介入——否则 Z 作为深度增益会被 tanh 吃掉
+            let maxStepShift: Float = (extreme ? 0.045 : 0.026) * rlMul
             // 每步"净位移" = 体积梯度 − 中心深度梯度（两者在 shift 里相减）
             // 只对净位移施加上限，保持体积/中心的比例不变
             // 体积步长：软饱和（tanh）后连续，不再硬夹断
@@ -984,6 +986,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         if let i = argv.firstIndex(of: "--pitch"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.pitch = v * .pi / 180 }
         if argv.contains("--mono") { renderer.params.mono = 1 }
         if argv.contains("--cal") { _ = renderer.buildCalibration() }
+        if let i = argv.firstIndex(of: "--zone"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.zoneDeg = v }
         if let i = argv.firstIndex(of: "--rot"), i + 1 < argv.count {
             let parts = argv[i + 1].split(separator: ",").compactMap { Float($0) }
             if parts.count == 2 {
