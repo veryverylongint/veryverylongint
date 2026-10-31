@@ -568,6 +568,34 @@ final class Renderer {
         return "\(gozName)  \(p.count) 点 / \(gozIdx.count/3) 三角" + (hasCol ? " · 顶点色" : "")
     }
 
+    /// 标定体：一个立方体 + 一个球。Z 正确时立方体看着就是"立方"；
+    /// Z 偏大 → 深度轴被压扁（变扁盒）；Z 偏小 → 被拉长（变深盒）。
+    @discardableResult
+    func buildCalibration() -> String {
+        meshes.removeAll()
+        var cube = box(size: 0.60, color: (0.82, 0.82, 0.86))
+        for i in cube.0.indices { cube.0[i].pos.1 += 0.30 }
+        add(cube)
+        var sp = sphere(radius: 0.15, color: (0.92, 0.60, 0.28))
+        for i in sp.0.indices { sp.0[i].pos.0 += 0.45; sp.0[i].pos.1 += 0.15 }
+        add(sp)
+        var bar = box(size: 0.06, color: (0.35, 0.85, 0.55))
+        for i in bar.0.indices { bar.0[i].pos.1 += 0.30; bar.0[i].pos.2 += 0.32 }
+        add(bar)
+        modelRadii = SIMD3<Float>(0.42, 0.30, 0.32)
+        modelCenterY = 0.30
+        // 3/4 视角：正对看立方体只会看到正方形，斜一点才能判断"深"
+        rotQ = simd_normalize(simd_quatf(angle: 0.62, axis: SIMD3<Float>(0, 1, 0))
+                              * simd_quatf(angle: 0.34, axis: SIMD3<Float>(1, 0, 0)))
+        let hfov = 2 * atan(18.0 / lens)
+        let vfov = 2 * atan(tan(hfov / 2) / (Float(VW) / Float(VH)))
+        dist = 1.0 / (0.65 * 2 * tan(vfov / 2))
+        fitDist = dist
+        panX = 0; panY = 0
+        lastGoZ = "calibration"
+        return "标定体：立方体 0.6 + 球 + 前伸条"
+    }
+
     func buildScene() {
         var ball = sphere(radius: 0.30, color: (0.92, 0.82, 0.72))
         for i in ball.0.indices { ball.0[i].pos.1 += 0.32 }
@@ -950,6 +978,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         }
         if let i = argv.firstIndex(of: "--pitch"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.pitch = v * .pi / 180 }
         if argv.contains("--mono") { renderer.params.mono = 1 }
+        if argv.contains("--cal") { _ = renderer.buildCalibration() }
         if let i = argv.firstIndex(of: "--rot"), i + 1 < argv.count {
             let parts = argv[i + 1].split(separator: ",").compactMap { Float($0) }
             if parts.count == 2 {
@@ -1271,9 +1300,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let b1 = NSButton(title: "载入最新", target: self, action: #selector(loadLatestGoZ))
         let b2 = NSButton(title: "选文件…", target: self, action: #selector(pickGoZ))
         let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
+        let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
         let b3 = NSButton(checkboxWithTitle: "自动监听", target: self, action: #selector(toggleWatch(_:)))
         b3.state = .on
-        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4); btnRow.addArrangedSubview(b3)
+        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4); btnRow.addArrangedSubview(bcal); btnRow.addArrangedSubview(b3)
         stack.addArrangedSubview(btnRow)
 
         let dropHint = NSTextField(labelWithString: "把 .GoZ 文件直接拖进这个窗口也能载入")
@@ -1364,6 +1394,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
                 }
             }
         }
+    }
+
+    @objc func loadCalibration() {
+        _ = renderer.buildCalibration()
+        gozStatus?.stringValue = "标定体：立方体 + 球（判断 Z 用）"
+        gozStatus?.textColor = .labelColor
+        markDirty(); resetView()
     }
 
     @objc func loadLatestGoZ() {
