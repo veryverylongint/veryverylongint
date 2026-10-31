@@ -1214,13 +1214,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
     var autoWatch = true
     var dragInvert = true          // 拖动反向开关（面板/预览共用）
     var lastGoZStamp = ""
+    var pages: [NSStackView] = []
+    weak var pageTabs: NSSegmentedControl?
 
     func buildControl() {
-        let W = 430.0, H = 900.0
+        let W = 430.0, H = 840.0
         let win = NSWindow(contentRect: NSRect(x: 40, y: 40, width: W, height: H),
                            styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
         win.title = "C1 光场预览 · ModelViewer"
-        win.minSize = NSSize(width: 380, height: 480)
+        win.minSize = NSSize(width: 400, height: 520)
         ctrlWin = win
 
         let scroll = DropScrollView(frame: NSRect(x: 0, y: 0, width: W, height: H))
@@ -1239,12 +1241,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         stack.spacing = 7
         stack.edgeInsets = NSEdgeInsets(top: 14, left: 16, bottom: 14, right: 16)
 
+        // ===== 页签式布局 =====
+        var cur: NSStackView!
+
+        func makePage() -> NSStackView {
+            let v = NSStackView()
+            v.orientation = .vertical
+            v.alignment = .leading
+            v.spacing = 7
+            pageHost.addArrangedSubview(v)
+            return v
+        }
         func header(_ t: String) {
             let l = NSTextField(labelWithString: t)
             l.font = .systemFont(ofSize: 11, weight: .semibold)
             l.textColor = .secondaryLabelColor
-            stack.addArrangedSubview(l)
-            stack.setCustomSpacing(3, after: l)
+            cur.addArrangedSubview(l)
+            cur.setCustomSpacing(3, after: l)
         }
         func sliderRow(_ key: String, _ lo: Double, _ hi: Double, _ val: Double) {
             let row = NSStackView()
@@ -1255,7 +1268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
             l.widthAnchor.constraint(equalToConstant: 72).isActive = true
             let sl = NSSlider(value: val, minValue: lo, maxValue: hi, target: self, action: #selector(sliderChanged(_:)))
             sl.identifier = NSUserInterfaceItemIdentifier(key)
-            sl.widthAnchor.constraint(equalToConstant: 210).isActive = true
+            sl.widthAnchor.constraint(equalToConstant: 200).isActive = true
             let f = NSTextField(string: fmtVal(key, val))
             f.font = .monospacedDigitSystemFont(ofSize: 10, weight: .regular)
             f.alignment = .right
@@ -1269,139 +1282,151 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
             let v = NSTextField(labelWithString: "")
             v.font = .systemFont(ofSize: 9)
             v.textColor = .secondaryLabelColor
-            v.widthAnchor.constraint(equalToConstant: 72).isActive = true
+            v.widthAnchor.constraint(equalToConstant: 66).isActive = true
             row.addArrangedSubview(l); row.addArrangedSubview(sl); row.addArrangedSubview(f); row.addArrangedSubview(v)
             labels[key] = v; sliders[key] = sl; fields[key] = f
-            stack.addArrangedSubview(row)
+            cur.addArrangedSubview(row)
         }
         func checkRow(_ title: String, _ sel: Selector) -> NSButton {
             let b = NSButton(checkboxWithTitle: title, target: self, action: sel)
             b.font = .systemFont(ofSize: 11)
-            stack.addArrangedSubview(b)
+            cur.addArrangedSubview(b)
             return b
         }
+        func hRow(_ views: [NSView]) {
+            let r = NSStackView(views: views)
+            r.orientation = .horizontal
+            r.spacing = 8
+            cur.addArrangedSubview(r)
+        }
 
-        // 预览
-        let pv = NavView(frame: NSRect(x: 0, y: 0, width: 180, height: 320), device: renderer.dev)
-        pv.colorPixelFormat = .bgra8Unorm
-        pv.delegate = self
-        pv.role = 1
-        pv.isPaused = false
-        pv.enableSetNeedsDisplay = false
-        pv.preferredFramesPerSecond = 20
-        pv.widthAnchor.constraint(equalToConstant: 180).isActive = true
-        pv.heightAnchor.constraint(equalToConstant: 320).isActive = true
-        wireNav(pv)
-        preview = pv
-        let pvRow = NSStackView(views: [pv])
-        pvRow.alignment = .centerY
-        stack.addArrangedSubview(pvRow)
+        // 页签栏
+        let tabs = NSSegmentedControl(labels: ["模型", "深度", "相机", "外观", "交织"],
+                                      trackingMode: .selectOne, target: self, action: #selector(switchPage(_:)))
+        tabs.selectedSegment = 0
+        stack.addArrangedSubview(tabs)
+        pageTabs = tabs
 
-        header("相机")
-        sliderRow("视距m", 0.05, 10.0, Double(renderer.dist))
+        let pageHost = NSStackView()
+        pageHost.orientation = .vertical
+        pageHost.alignment = .leading
+        pageHost.spacing = 0
+        stack.addArrangedSubview(pageHost)
 
-        let camInfo = NSTextField(labelWithString: "")
-        camInfo.font = .monospacedDigitSystemFont(ofSize: 9, weight: .regular)
-        camInfo.textColor = .secondaryLabelColor
-        camInfo.identifier = NSUserInterfaceItemIdentifier("camInfo")
-        stack.addArrangedSubview(camInfo)
+        let pModel = makePage(), pDepth = makePage(), pCam = makePage(), pAppear = makePage(), pWeave = makePage()
+        pages = [pModel, pDepth, pCam, pAppear, pWeave]
+        for (i, pg) in pages.enumerated() { pg.isHidden = (i != 0) }
 
-        header("光栅")
-        header("深度")
-        sliderRow("立体强度", 0.3, 4.0, Double(renderer.rlMul))
-        sliderRow("体积cm", 0.2, 6.0, Double(renderer.volCM))
-        sliderRow("出屏cm", 0.0, 16.0, Double(renderer.popCM))
-        sliderRow("扇区Z°", 5.0, 120.0, Double(renderer.zoneDeg))
-        sliderRow("观看距离", 0.15, 2.0, Double(renderer.viewDist))
-        header("相机")
-        sliderRow("视点数", 2, 40, Double(renderer.views))
-        sliderRow("焦距mm", 6, 600, Double(renderer.lens))
-        header("交织")
-        sliderRow("降采样起始N", 0, 40, Double(renderer.perfFrom))
-        sliderRow("曝光", 0.3, 2.5, Double(renderer.lightGain))
-        sliderRow("视角°", 0, 360, Double(renderer.yaw * 180 / .pi))
-        sliderRow("光方位°", 0, 360, Double(renderer.lightAzDeg))
-        sliderRow("光高度°", -80, 85, Double(renderer.lightElDeg))
-        sliderRow("对比度", 0.8, 1.8, Double(renderer.contrast))
-        sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
-        sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
-        sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
-        sliderRow("相位", 0.0, 40.0, Double(renderer.params.deviation))
-
-        header("显示")
-        let ipdBtn = checkRow("IPD 基线(两端=双眼)", #selector(toggleIPD(_:)))
-        ipdBtn.state = renderer.useIPD ? .on : .off
-        let inv = checkRow("反转视点序", #selector(toggleInvert(_:)))
-        inv.state = .on
-        let mk = checkRow("立体标记(左上角)", #selector(toggleMarker(_:)))
-        mk.state = .on
-        let ex = checkRow("极限模式(放宽上限)", #selector(toggleExtreme(_:)))
-        _ = ex
-        let dInv = checkRow("拖动反向", #selector(toggleDragInvert(_:)))
-        dInv.state = .on
-        let q = checkRow("看图集(排查)", #selector(toggleQuilt(_:)))
-        let bd = checkRow("视点色带(排查)", #selector(toggleBands(_:)))
-        _ = q; _ = bd
-
-        header("ZBrush GoZ")
+        // ---------- 模型 ----------
+        cur = pModel
         let st = NSTextField(labelWithString: "未载入 · 监听 ZBrush GoZ 导出目录")
         st.font = .systemFont(ofSize: 10)
         st.textColor = .secondaryLabelColor
         st.lineBreakMode = .byTruncatingMiddle
         st.widthAnchor.constraint(equalToConstant: 380).isActive = true
         gozStatus = st
-        stack.addArrangedSubview(st)
-
+        cur.addArrangedSubview(st)
+        hRow([NSButton(title: "载入最新", target: self, action: #selector(loadLatestGoZ)),
+              NSButton(title: "选文件…", target: self, action: #selector(pickGoZ)),
+              NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))])
+        hRow([NSButton(title: "标定体", target: self, action: #selector(loadCalibration)),
+              NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))])
+        let watchBox = NSButton(checkboxWithTitle: "自动监听 ZBrush 导出", target: self, action: #selector(toggleWatch(_:)))
+        watchBox.state = .on; watchBox.font = .systemFont(ofSize: 11)
+        cur.addArrangedSubview(watchBox)
         let flipRow = NSStackView()
-        flipRow.orientation = .horizontal
-        flipRow.spacing = 10
+        flipRow.orientation = .horizontal; flipRow.spacing = 10
         let fy = NSButton(checkboxWithTitle: "上下翻转", target: self, action: #selector(toggleFlipY(_:)))
         let fz = NSButton(checkboxWithTitle: "前后翻转", target: self, action: #selector(toggleFlipZ(_:)))
-        let mb = NSButton(checkboxWithTitle: "单视点(诊断)", target: self, action: #selector(toggleMono(_:)))
-        mb.font = .systemFont(ofSize: 11)
         fy.font = .systemFont(ofSize: 11); fz.font = .systemFont(ofSize: 11)
-        flipRow.addArrangedSubview(fy); flipRow.addArrangedSubview(fz); flipRow.addArrangedSubview(mb)
-        stack.addArrangedSubview(flipRow)
-
+        flipRow.addArrangedSubview(fy); flipRow.addArrangedSubview(fz)
+        cur.addArrangedSubview(flipRow)
         let dirLabel = NSTextField(labelWithString: "监控: " + gozDirs.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "))
         dirLabel.font = .systemFont(ofSize: 9)
         dirLabel.textColor = .tertiaryLabelColor
         dirLabel.lineBreakMode = .byTruncatingMiddle
         dirLabel.widthAnchor.constraint(equalToConstant: 380).isActive = true
-        stack.addArrangedSubview(dirLabel)
+        cur.addArrangedSubview(dirLabel)
 
-        let btnRow = NSStackView()
-        btnRow.orientation = .horizontal
-        btnRow.spacing = 8
-        let b1 = NSButton(title: "载入最新", target: self, action: #selector(loadLatestGoZ))
-        let b2 = NSButton(title: "选文件…", target: self, action: #selector(pickGoZ))
-        let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
-        let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
-        let bax = NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))
-        let matSeg = NSSegmentedControl(labels: ["哑光", "影棚", "金属", "蜡质"], trackingMode: .selectOne,
-                                        target: self, action: #selector(segMaterial(_:)))
-        matSeg.selectedSegment = renderer.material
-        let bref = NSButton(title: "参考档", target: self, action: #selector(applyRefPreset))
-        let rotRow = NSStackView(); rotRow.orientation = .horizontal; rotRow.spacing = 4
-        for (t, sel) in [("◀", #selector(nudgeL)), ("▶", #selector(nudgeR)),
-                         ("▲", #selector(nudgeU)), ("▼", #selector(nudgeD))] {
+        // ---------- 深度 ----------
+        cur = pDepth
+        let modeSeg = NSSegmentedControl(labels: ["精确 B", "激进 A"], trackingMode: .selectOne,
+                                         target: self, action: #selector(segMode(_:)))
+        modeSeg.selectedSegment = renderer.viewMode
+        hRow([modeSeg, NSButton(title: "参考档", target: self, action: #selector(applyRefPreset))])
+        sliderRow("立体强度", 0.3, 4.0, Double(renderer.rlMul))
+        sliderRow("体积cm", 0.2, 6.0, Double(renderer.volCM))
+        sliderRow("出屏cm", 0.0, 16.0, Double(renderer.popCM))
+        sliderRow("扇区Z°", 5.0, 120.0, Double(renderer.zoneDeg))
+        sliderRow("观看距离", 0.15, 2.0, Double(renderer.viewDist))
+
+        // ---------- 相机 ----------
+        cur = pCam
+        sliderRow("视距m", 0.05, 10.0, Double(renderer.dist))
+        sliderRow("视点数", 2, 40, Double(renderer.views))
+        sliderRow("焦距mm", 6, 600, Double(renderer.lens))
+        sliderRow("视角°", 0, 360, Double(renderer.yaw * 180 / .pi))
+        let rotRow = NSStackView(); rotRow.orientation = .horizontal; rotRow.spacing = 6
+        for (t, sel) in [("◀ 90°", #selector(nudgeL)), ("▶ 90°", #selector(nudgeR)),
+                         ("▲ 90°", #selector(nudgeU)), ("▼ 90°", #selector(nudgeD))] {
             let b = NSButton(title: t, target: self, action: sel)
             b.bezelStyle = .rounded; b.font = .systemFont(ofSize: 11)
             rotRow.addArrangedSubview(b)
         }
-        let bmode = NSSegmentedControl(labels: ["精确 B", "激进 A"], trackingMode: .selectOne,
-                                       target: self, action: #selector(segMode(_:)))
-        bmode.selectedSegment = renderer.viewMode
-        let b3 = NSButton(checkboxWithTitle: "自动监听", target: self, action: #selector(toggleWatch(_:)))
-        b3.state = .on
-        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4)
-        let btnRow2 = NSStackView()
-        btnRow2.orientation = .horizontal
-        btnRow2.spacing = 8
-        btnRow2.addArrangedSubview(bcal); btnRow2.addArrangedSubview(bax); btnRow2.addArrangedSubview(bmode)
-        btnRow2.addArrangedSubview(matSeg); btnRow2.addArrangedSubview(bref); btnRow2.addArrangedSubview(b3)
-        stack.addArrangedSubview(btnRow)
-        stack.addArrangedSubview(btnRow2)
+        cur.addArrangedSubview(rotRow)
+        hRow([NSButton(title: "复位视角", target: self, action: #selector(resetView))])
+
+        // ---------- 外观 ----------
+        cur = pAppear
+        let matSeg = NSSegmentedControl(labels: ["哑光", "影棚", "金属", "蜡质"], trackingMode: .selectOne,
+                                        target: self, action: #selector(segMaterial(_:)))
+        matSeg.selectedSegment = renderer.material
+        cur.addArrangedSubview(matSeg)
+        sliderRow("曝光", 0.3, 2.5, Double(renderer.lightGain))
+        sliderRow("对比度", 0.8, 1.8, Double(renderer.contrast))
+        sliderRow("光方位°", 0, 360, Double(renderer.lightAzDeg))
+        sliderRow("光高度°", -80, 85, Double(renderer.lightElDeg))
+
+        // ---------- 交织 ----------
+        cur = pWeave
+        sliderRow("降采样起始N", 0, 40, Double(renderer.perfFrom))
+        sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
+        sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
+        sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
+        sliderRow("相位", 0.0, 40.0, Double(renderer.params.deviation))
+        let ipdBtn = checkRow("IPD 基线(两端=双眼)", #selector(toggleIPD(_:)))
+        ipdBtn.state = renderer.useIPD ? .on : .off
+        let inv = checkRow("反转视点序", #selector(toggleInvert(_:))); inv.state = .on
+        let mk = checkRow("立体标记(左上角)", #selector(toggleMarker(_:))); mk.state = .on
+        _ = checkRow("极限模式(放宽上限)", #selector(toggleExtreme(_:)))
+        let dInv = checkRow("拖动反向", #selector(toggleDragInvert(_:))); dInv.state = .on
+        _ = checkRow("看图集(排查)", #selector(toggleQuilt(_:)))
+        _ = checkRow("视点色带(排查)", #selector(toggleBands(_:)))
+        let mb = NSButton(checkboxWithTitle: "单视点(诊断)", target: self, action: #selector(toggleMono(_:)))
+        mb.font = .systemFont(ofSize: 11)
+        cur.addArrangedSubview(mb)
+
+        // 预览缩略图放最上面
+        let pv = NavView(frame: NSRect(x: 0, y: 0, width: 150, height: 267), device: renderer.dev)
+        pv.colorPixelFormat = .bgra8Unorm
+        pv.delegate = self
+        pv.role = 1
+        pv.isPaused = false
+        pv.enableSetNeedsDisplay = false
+        pv.preferredFramesPerSecond = 20
+        pv.widthAnchor.constraint(equalToConstant: 150).isActive = true
+        pv.heightAnchor.constraint(equalToConstant: 267).isActive = true
+        wireNav(pv)
+        preview = pv
+        let pvRow = NSStackView(views: [pv])
+        pvRow.alignment = .centerY
+        stack.insertArrangedSubview(pvRow, at: 0)
+
+        let camInfo = NSTextField(labelWithString: "")
+        camInfo.font = .monospacedDigitSystemFont(ofSize: 9, weight: .regular)
+        camInfo.textColor = .secondaryLabelColor
+        camInfo.identifier = NSUserInterfaceItemIdentifier("camInfo")
+        stack.addArrangedSubview(camInfo)
         stack.addArrangedSubview(rotRow)
 
         let dropHint = NSTextField(labelWithString: "把 .GoZ 文件直接拖进这个窗口也能载入")
@@ -1492,6 +1517,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
                 }
             }
         }
+    }
+
+    @objc func switchPage(_ seg: NSSegmentedControl) {
+        for (i, pg) in pages.enumerated() { pg.isHidden = (i != seg.selectedSegment) }
     }
 
     @objc func nudgeL() { nudge(-1, 0) }
