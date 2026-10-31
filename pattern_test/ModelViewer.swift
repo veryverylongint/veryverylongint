@@ -779,7 +779,9 @@ final class Renderer {
         if !needsQuilt { return }
         needsQuilt = false
         // 拖动/缩放时每帧只渲 1/4 相机（5 台），停手后自动补一帧满视点
-        let m = max(1, min(views, isDragging ? min(2, views) : every))
+        // 低视点模式（N≤8）拖动时不降采样：4–8 台本身够快，插值跨视点会造成双影+切换跳变
+        let dragM = views <= 8 ? 1 : 2
+        let m = max(1, min(views, isDragging ? min(dragM, views) : every))
         let camCount = (views + m - 1) / m
         let cols = camCount <= 8 ? camCount : 8
         let rows = (camCount + cols - 1) / cols
@@ -1317,7 +1319,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
         let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
         let bax = NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))
-        let bmode = NSButton(title: "模式 B→A", target: self, action: #selector(switchMode))
+        let bmode = NSSegmentedControl(labels: ["精确 B", "激进 A"], trackingMode: .selectOne,
+                                       target: self, action: #selector(segMode(_:)))
+        bmode.selectedSegment = renderer.viewMode
         let b3 = NSButton(checkboxWithTitle: "自动监听", target: self, action: #selector(toggleWatch(_:)))
         b3.state = .on
         btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4)
@@ -1416,6 +1420,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
                 }
             }
         }
+    }
+
+    @objc func segMode(_ seg: NSSegmentedControl) {
+        let want = seg.selectedSegment == 1 ? 1 : 0
+        if want == renderer.viewMode { return }
+        switchMode()
     }
 
     @objc func switchMode() {
@@ -1645,6 +1655,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
             return vd * 1000.0 * pm / (Double(renderer.ipdMM) + pm)
         }
         l.stringValue += String(format: " · 标记浮起 Z40/60/90 = %.1f/%.1f/%.1f mm", mz(40), mz(60), mz(90))
+        // 当前上限对应的最大出屏（帮判断"还有没有空间"）
+        let capTotal = cellsNow * Double(renderer.dbgStepPx) / 720.0   // 用真实生效的步长算上限
+        let capP = capTotal * 35.5
+        let capPop = vd * 1000.0 * capP / (Double(renderer.ipdMM) + capP) / 10.0
+        l.stringValue += String(format: " · 模式%@ 上限出屏 %.1fcm", renderer.viewMode == 1 ? "A" : "B", capPop)
         let nRec = max(2, Int((Double(renderer.zoneDeg) / eyeDegNow).rounded()))
         // 甜点覆盖：相邻视点的眼区间距 vs 瞳距。间距 ≥ 瞳距 → 中间有"丢立体"的空档
         let cellDeg = Double(renderer.zoneDeg) / Double(max(1, renderer.views))
