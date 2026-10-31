@@ -55,9 +55,19 @@ fragment float4 fmain(VOut in [[stage_in]], constant U& u [[buffer(1)]]) {
 
     float diff = max(dot(n, L), 0.0);
     float3 h = normalize(L + V);
-    float spec = pow(max(dot(n, h), 0.0), 48.0) * u.flags.x;
-    float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.35;
-    float3 lit = base * (0.22 + 0.85 * diff) + float3(spec) + float3(rim) * 0.6;
+    float3 lit;
+    if (u.flags.y > 0.5) {
+        // 手办 PVC：半透白感 + 高光收敛 + 轮廓菲涅尔
+        float spec = pow(max(dot(n, h), 0.0), 28.0) * 1.15;
+        float spec2 = pow(max(dot(n, h), 0.0), 5.0) * 0.25;      // 柔和的次级高光
+        float fres = pow(1.0 - max(dot(n, V), 0.0), 2.2) * 0.55;
+        float3 sssv = base * (0.30 + 0.78 * diff) + base * 0.18;  // 打底的通透底色
+        lit = sssv + float3(spec + spec2) + float3(fres) * 0.85;
+    } else {
+        float spec = pow(max(dot(n, h), 0.0), 48.0) * u.flags.x;
+        float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.35;
+        lit = base * (0.22 + 0.85 * diff) + float3(spec) + float3(rim) * 0.6;
+    }
     return float4(lit, 1.0);
 }
 
@@ -488,6 +498,8 @@ final class Renderer {
     var flipY = false
     var axisMode: Int = 0                          // 0=Z-up 1=Y-up 2=Y-up 翻转
     var viewMode: Int = 0                          // 0=B 稳定移动  1=A 跳变突出
+    var materialPVC = false                        // 手办 PVC 材质
+    var perfFrom: Int = 0                          // 0 = 不降采样；≥ 该视点数才降
     var dbgLastN: Float = -1; var dbgShiftMin: Float = 0; var dbgShiftMax: Float = 0
     var dbgStepPx: Float = 0; var rayleighHit = false
     var effVolTot: Float = 0; var effCenTot: Float = 0; var stepVolDbg: Float = 0
@@ -750,9 +762,13 @@ final class Renderer {
         let (mvp, viewM) = cameraMatrix(view: i, n: n)
         u.mvp = mvp
         u.nm = simd_transpose(simd_inverse(viewM)) * modelMatrix()
-        u.light = SIMD4<Float>(normalize(SIMD3<Float>(-0.45, 0.85, 0.55)), 0)
-        u.eye = SIMD4<Float>((simd_inverse(viewM) * SIMD4<Float>(0, 0, 0, 1)).xyz, 1)
-        u.flags = SIMD4<Float>(0.45, 0, 0, 0)
+        // 光源跟随模型姿态的逆变换 → 改轴向/旋转模型时光照关系不变
+        let lw = simd_normalize(SIMD3<Float>(-0.45, 0.85, 0.55))
+        let lw2 = simd_normalize(rotQ.inverse.act(lw))
+        u.light = SIMD4<Float>(lw2.x, lw2.y, lw2.z, 0)
+        let e4 = simd_inverse(viewM) * SIMD4<Float>(0, 0, 0, 1)
+        u.eye = SIMD4<Float>(e4.x, e4.y, e4.z, 1)
+        u.flags = SIMD4<Float>(0.45, materialPVC ? 1 : 0, 0, 0)
         for (_, m) in meshes.enumerated() {
             u.tint = SIMD4<Float>(1, 1, 1, 0)          // 地面已删除，不再有暗色网格材质
             enc.setVertexBuffer(m.vbuf, offset: 0, index: 0)
@@ -779,9 +795,10 @@ final class Renderer {
         if !needsQuilt { return }
         needsQuilt = false
         // 拖动/缩放时每帧只渲 1/4 相机（5 台），停手后自动补一帧满视点
-        // 低视点模式（N≤8）拖动时不降采样：4–8 台本身够快，插值跨视点会造成双影+切换跳变
-        let dragM = views <= 8 ? 1 : 2
-        let m = max(1, min(views, isDragging ? min(dragM, views) : every))
+        // 性能降采样：perfFrom 为 0 表示永不降采样（默认）；否则视点数 ≥ perfFrom 才降到 every
+        let perfOn = perfFrom > 0 && views >= perfFrom
+        let dragM = views <= 8 ? 1 : (perfOn ? max(1, every) : 1)
+        let m = max(1, min(views, isDragging ? min(dragM, views) : (perfOn ? every : 1)))
         let camCount = (views + m - 1) / m
         let cols = camCount <= 8 ? camCount : 8
         let rows = (camCount + cols - 1) / cols
@@ -1263,7 +1280,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         sliderRow("视点数", 2, 40, Double(renderer.views))
         sliderRow("焦距mm", 6, 600, Double(renderer.lens))
         header("交织")
-        sliderRow("实渲间隔", 1, 8, Double(renderer.every))
+        sliderRow("降采样起始N", 0, 40, Double(renderer.perfFrom))
         sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
         sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
         sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
@@ -1319,6 +1336,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
         let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
         let bax = NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))
+        let matSeg = NSSegmentedControl(labels: ["哑光", "PVC"], trackingMode: .selectOne,
+                                        target: self, action: #selector(segMaterial(_:)))
+        matSeg.selectedSegment = renderer.materialPVC ? 1 : 0
+        let bref = NSButton(title: "参考档", target: self, action: #selector(applyRefPreset))
         let bmode = NSSegmentedControl(labels: ["精确 B", "激进 A"], trackingMode: .selectOne,
                                        target: self, action: #selector(segMode(_:)))
         bmode.selectedSegment = renderer.viewMode
@@ -1328,7 +1349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let btnRow2 = NSStackView()
         btnRow2.orientation = .horizontal
         btnRow2.spacing = 8
-        btnRow2.addArrangedSubview(bcal); btnRow2.addArrangedSubview(bax); btnRow2.addArrangedSubview(bmode); btnRow2.addArrangedSubview(b3)
+        btnRow2.addArrangedSubview(bcal); btnRow2.addArrangedSubview(bax); btnRow2.addArrangedSubview(bmode)
+        btnRow2.addArrangedSubview(matSeg); btnRow2.addArrangedSubview(bref); btnRow2.addArrangedSubview(b3)
         stack.addArrangedSubview(btnRow)
         stack.addArrangedSubview(btnRow2)
 
@@ -1420,6 +1442,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
                 }
             }
         }
+    }
+
+    @objc func segMaterial(_ seg: NSSegmentedControl) {
+        renderer.materialPVC = seg.selectedSegment == 1
+        markDirty()
+    }
+
+    @objc func applyRefPreset() {
+        renderer.dist = 1.55; renderer.rlMul = 1.8
+        renderer.volCM = 6.0; renderer.popCM = 0.0
+        renderer.zoneDeg = 5.0; renderer.viewDist = 0.7
+        renderer.views = 2; renderer.lens = 92.1
+        renderer.perfFrom = 0; renderer.every = 1
+        markDirty(); updateCamInfo()
     }
 
     @objc func segMode(_ seg: NSSegmentedControl) {
@@ -1520,6 +1556,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         case "相位偏移": renderer.phaseOffset = Float(val)
         case "视点数": renderer.views = Int(val.rounded())
         case "实渲间隔": renderer.every = max(1, Int(val.rounded()))
+        case "降采样起始N": renderer.perfFrom = Int(val.rounded()); markDirty()
         case "视点偏移": renderer.eyeOffsetDeg = Float(val)
         case "焦平面": renderer.focalOffset = Float(val)
         case "体积cm": renderer.volCM = Float(val)
