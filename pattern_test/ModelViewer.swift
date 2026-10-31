@@ -789,7 +789,7 @@ final class Renderer {
         if !needsQuilt { return }
         needsQuilt = false
         // 拖动/缩放时每帧只渲 1/4 相机（5 台），停手后自动补一帧满视点
-        let m = max(1, min(views, isDragging ? max(every, 4) : every))
+        let m = max(1, min(views, isDragging ? max(every, 2) : every))
         let camCount = (views + m - 1) / m
         let cols = camCount <= 8 ? camCount : 8
         let rows = (camCount + cols - 1) / cols
@@ -1253,8 +1253,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
 
         header("相机")
         sliderRow("视距m", 0.05, 10.0, Double(renderer.dist))
-        sliderRow("焦距mm", 6, 600, Double(renderer.lens))
-        sliderRow("视差%", 0.2, 5.0, Double(renderer.targetDisparity) * 100)
 
         let camInfo = NSTextField(labelWithString: "")
         camInfo.font = .monospacedDigitSystemFont(ofSize: 9, weight: .regular)
@@ -1263,15 +1261,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         stack.addArrangedSubview(camInfo)
 
         header("光栅")
-        sliderRow("视点数", 2, 40, Double(renderer.views))
-        sliderRow("实渲间隔", 1, 8, Double(renderer.every))
-        sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
-        sliderRow("观看距离", 0.15, 2.0, 0.7)
-        sliderRow("扇区Z°", 5.0, 120.0, 90.0)
-        sliderRow("透视比", 1.05, 4.0, 2.0)
+        header("深度")
+        sliderRow("立体强度", 0.3, 4.0, Double(renderer.rlMul))
         sliderRow("体积cm", 0.2, 6.0, Double(renderer.volCM))
         sliderRow("出屏cm", 0.0, 16.0, Double(renderer.popCM))
-        sliderRow("立体强度", 0.3, 4.0, Double(renderer.rlMul))
+        sliderRow("扇区Z°", 5.0, 120.0, Double(renderer.zoneDeg))
+        sliderRow("观看距离", 0.15, 2.0, Double(renderer.viewDist))
+        header("相机")
+        sliderRow("视点数", 2, 40, Double(renderer.views))
+        sliderRow("焦距mm", 6, 600, Double(renderer.lens))
+        header("交织")
+        sliderRow("实渲间隔", 1, 8, Double(renderer.every))
+        sliderRow("相位偏移", -9.8, 9.8, Double(renderer.phaseOffset))
         sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
         sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
         sliderRow("相位", 0.0, 40.0, Double(renderer.params.deviation))
