@@ -480,6 +480,7 @@ final class Renderer {
 
     var lastGoZ: String = ""
     var flipY = false
+    var axisMode: Int = 0                          // 0=Z-up 1=Y-up 2=Y-up 翻转
     var dbgLastN: Float = -1; var dbgShiftMin: Float = 0; var dbgShiftMax: Float = 0
     var dbgStepPx: Float = 0; var rayleighHit = false
     var effVolTot: Float = 0; var stepVolDbg: Float = 0
@@ -504,7 +505,13 @@ final class Renderer {
         guard !gozPos.isEmpty else { return nil }
         // ZBrush 坐标是 Z-up（X右 / Y向内 / Z上），场景是 Y-up → 先做轴变换再叠加手动翻转
         let p: [SIMD3<Float>] = gozPos.map { q in
-            var v = SIMD3<Float>(q.x, q.z, -q.y)
+            // 轴约定：ZBrush 通常是 Z-up，但也有 Y-up 的资产
+            var v: SIMD3<Float>
+            switch axisMode {
+            case 1:  v = SIMD3<Float>(q.x, q.y, -q.z)     // Y-up（正面朝 -Z）
+            case 2:  v = SIMD3<Float>(q.x, -q.y, -q.z)    // Y-up 上下颠倒
+            default: v = SIMD3<Float>(q.x, q.z, -q.y)     // Z-up（ZBrush 默认）
+            }
             if flipY { v.y = -v.y }
             if flipZ { v.z = -v.z }
             return v
@@ -683,7 +690,8 @@ final class Renderer {
             // 超出则单眼会看到"分离的硬边"而非"柔化边缘"
             // 常态 = 瑞利无重影锁 0.45% 屏宽；极限模式放宽 3.1 倍（立体更强、接受重影）
             // 上限只做"极端保护"，常态下不介入——否则 Z 作为深度增益会被 tanh 吃掉
-            let maxStepShift: Float = (extreme ? 0.045 : 0.026) * rlMul
+            // 双上限：单步不超 (每步上限)，整扇面不超 0.28 NDC（否则外视点被拉出画外）
+            let maxStepShift: Float = min((extreme ? 0.045 : 0.026) * rlMul, 0.28 / max(1.0, n1F))
             // 每步"净位移" = 体积梯度 − 中心深度梯度（两者在 shift 里相减）
             // 只对净位移施加上限，保持体积/中心的比例不变
             // 体积步长：软饱和（tanh）后连续，不再硬夹断
@@ -985,6 +993,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         }
         if let i = argv.firstIndex(of: "--pitch"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.pitch = v * .pi / 180 }
         if argv.contains("--mono") { renderer.params.mono = 1 }
+        if let i = argv.firstIndex(of: "--axis"), i + 1 < argv.count, let v = Int(argv[i + 1]) { renderer.axisMode = v; if !renderer.gozPos.isEmpty { _ = renderer.rebuildGoZ() } }
         if argv.contains("--cal") { _ = renderer.buildCalibration() }
         if let i = argv.firstIndex(of: "--zone"), i + 1 < argv.count, let v = Float(argv[i + 1]) { renderer.zoneDeg = v }
         if let i = argv.firstIndex(of: "--rot"), i + 1 < argv.count {
@@ -1309,9 +1318,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         let b2 = NSButton(title: "选文件…", target: self, action: #selector(pickGoZ))
         let b4 = NSButton(title: "监控文件夹…", target: self, action: #selector(pickWatchDir))
         let bcal = NSButton(title: "标定体", target: self, action: #selector(loadCalibration))
+        let bax = NSButton(title: "轴向 Z/Y/Y′", target: self, action: #selector(cycleAxis))
         let b3 = NSButton(checkboxWithTitle: "自动监听", target: self, action: #selector(toggleWatch(_:)))
         b3.state = .on
-        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4); btnRow.addArrangedSubview(bcal); btnRow.addArrangedSubview(b3)
+        btnRow.addArrangedSubview(b1); btnRow.addArrangedSubview(b2); btnRow.addArrangedSubview(b4); btnRow.addArrangedSubview(bcal); btnRow.addArrangedSubview(bax); btnRow.addArrangedSubview(b3)
         stack.addArrangedSubview(btnRow)
 
         let dropHint = NSTextField(labelWithString: "把 .GoZ 文件直接拖进这个窗口也能载入")
@@ -1402,6 +1412,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
                 }
             }
         }
+    }
+
+    @objc func cycleAxis() {
+        renderer.axisMode = (renderer.axisMode + 1) % 3
+        _ = renderer.rebuildGoZ()
+        gozStatus?.stringValue = ["轴向 Z-up", "轴向 Y-up", "轴向 Y-up 翻转"][renderer.axisMode]
+        markDirty()
     }
 
     @objc func loadCalibration() {
