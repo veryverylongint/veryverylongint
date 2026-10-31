@@ -401,7 +401,9 @@ final class Renderer {
     var popCM: Float = 1.5                       // ★ 目标出屏距离（cm）
     var extreme = false                          // 极限模式：放宽单格角/扇形角上限
     var rlMul: Float = 1.8
-    var focusSlice: Float = -0.25                  // 零视差面位置（模型半径的倍数）                       // 瑞利锁倍率（立体强度，1.0 = 6.5px/步）
+    var focusSlice: Float = -0.25                  // 零视差面位置（模型半径的倍数）
+    var rotQ = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))   // 模型姿态（trackball，无极点）
+    var modelCenterY: Float = 0.5                       // 瑞利锁倍率（立体强度，1.0 = 6.5px/步）
     var useIPD = false
     var ipdMM: Float = 63
     var zoneDeg: Float = 40.0
@@ -540,7 +542,9 @@ final class Renderer {
             let c = hasCol ? gozCol[k] : SIMD3<Float>(0.84, 0.80, 0.76)
             verts.append(VIn(pos: (q.x, q.y, q.z), nrm: (nn.x, nn.y, nn.z), col: (c.x, c.y, c.z)))
         }
-        for k in verts.indices { verts[k].pos.1 -= minY }
+        var maxY: Float = 0
+        for k in verts.indices { verts[k].pos.1 -= minY; maxY = max(maxY, verts[k].pos.1) }
+        modelCenterY = maxY * 0.5
         // 10–90% 分位数椭球半径：滤掉长矛/底座等离群顶点
         var ax = [Float](), ay = [Float](), az = [Float]()
         ax.reserveCapacity(verts.count); ay.reserveCapacity(verts.count); az.reserveCapacity(verts.count)
@@ -687,15 +691,25 @@ final class Renderer {
              SIMD4<Float>(right.y, camUp.y, -fwd.y, 0),
              SIMD4<Float>(right.z, camUp.z, -fwd.z, 0),
              SIMD4<Float>(-dot(right, eye), -dot(camUp, eye), dot(fwd, eye), 1)))
-        let modelM = simd_float4x4(diagonal: SIMD4<Float>(modelScale, modelScale, modelScale, 1))
+        let modelM = modelMatrix()
         return (proj * viewM * modelM, viewM)
+    }
+
+    func modelMatrix() -> simd_float4x4 {
+        let cy = modelCenterY
+        let s = simd_float4x4(diagonal: SIMD4<Float>(modelScale, modelScale, modelScale, 1))
+        let t1 = simd_float4x4(SIMD4<Float>(1,0,0,0), SIMD4<Float>(0,1,0,0),
+                               SIMD4<Float>(0,0,1,0), SIMD4<Float>(0, cy, 0, 1))
+        let t2 = simd_float4x4(SIMD4<Float>(1,0,0,0), SIMD4<Float>(0,1,0,0),
+                               SIMD4<Float>(0,0,1,0), SIMD4<Float>(0, -cy, 0, 1))
+        return t1 * simd_float4x4(rotQ) * t2 * s
     }
 
     func encodeScene(_ enc: MTLRenderCommandEncoder, view i: Int, n: Int) {
         var u = U()
         let (mvp, viewM) = cameraMatrix(view: i, n: n)
         u.mvp = mvp
-        u.nm = simd_transpose(simd_inverse(viewM))
+        u.nm = simd_transpose(simd_inverse(viewM)) * modelMatrix()
         u.light = SIMD4<Float>(normalize(SIMD3<Float>(-0.45, 0.85, 0.55)), 0)
         u.eye = SIMD4<Float>((simd_inverse(viewM) * SIMD4<Float>(0, 0, 0, 1)).xyz, 1)
         u.flags = SIMD4<Float>(0.45, 0, 0, 0)
@@ -1394,6 +1408,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
 
     @objc func resetView() {
         renderer.yaw = 0; renderer.pitch = 0; renderer.dist = renderer.fitDist
+        renderer.rotQ = simd_quatf(angle: 0, axis: SIMD3<Float>(0, 1, 0))
         renderer.modelScale = 1; renderer.panX = 0; renderer.panY = 0
         markDirty()
     }
@@ -1444,12 +1459,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         renderer.requestRedraw = { [weak self] in self?.markDirty() }
         v.onOrbit = { [weak self] dx, dy in
             guard let r = self?.renderer else { return }
+            // trackball：绕屏幕平面的轴旋转模型，无极点、无翻转、无角度上限
             let sgn: Float = (self?.dragInvert ?? true) ? -1 : 1
-            r.yaw += sgn * Float(dx) * 0.020
-            r.pitch += Float(dy) * 0.020
-            // 越过极点时翻转 yaw 并镜像 pitch → 角度无上限，可连续翻过顶/底
-            if r.pitch > 1.562 { r.pitch = Float.pi - r.pitch; r.yaw += .pi }
-            if r.pitch < -1.562 { r.pitch = -Float.pi - r.pitch; r.yaw += .pi }
+            let dxf = Float(dx), dyf = Float(dy)
+            let len = sqrt(dxf * dxf + dyf * dyf)
+            if len > 0.0001 {
+                let axis = simd_normalize(SIMD3<Float>(dyf * sgn, dxf * sgn, 0))
+                let q = simd_quatf(angle: len * 0.008, axis: axis)
+                r.rotQ = simd_normalize(q * r.rotQ)
+            }
             r.noteInteraction()
             self?.markDirty()
         }
