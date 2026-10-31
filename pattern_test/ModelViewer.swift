@@ -399,6 +399,7 @@ final class Renderer {
     var budgetPct: Float = 20.0                  // 内部安全上限（一般不再由用户调）
     var popCM: Float = 1.5                       // ★ 目标出屏距离（cm）
     var extreme = false                          // 极限模式：放宽单格角/扇形角上限
+    var rlMul: Float = 1.0                       // 瑞利锁倍率（立体强度，1.0 = 6.5px/步）
     var useIPD = false
     var ipdMM: Float = 63
     var zoneDeg: Float = 90.0
@@ -592,6 +593,9 @@ final class Renderer {
                                            modelRadii.z * fwd.z)) * modelScale)
         let leverIso  = min(12.0, max(0.2, (d - rIso) / rIso))
         let leverProj = min(12.0, max(0.2, (d - rProj) / rProj))
+        // 预算必须与视角无关：否则旋转时 dispCap/fanCap 逐帧变化 → 视差跳变闪烁
+        let rBound = max(rIso, max(modelRadii.x, max(modelRadii.y, modelRadii.z)) * modelScale)
+        let leverBound = min(12.0, max(0.2, (d - rBound) / rBound))
 
         let ipdDeg = 2 * atan(Double(ipdMM) / 1000.0 / (2 * Double(max(0.05, viewDist)))) * 180 / .pi
         let cells  = max(1.0, Double(n) * ipdDeg / Double(max(1.0, zoneDeg)))
@@ -609,8 +613,8 @@ final class Renderer {
             // 安全预算：单格融合角 7°、最外视点张角 35°、单侧上限 3.5%
             let tanCell: Float = extreme ? 0.2679 : 0.12278     // tan15° / tan7°
             let tanFan: Float  = extreme ? 1.0000 : 0.7002      // tan45° / tan35°
-            let dispCap: Float = (tanCell * cellsF) / (2.0 * leverProj * Tan)
-            let fanCap: Float = (tanFan * cellsF) / (n1F * leverProj * Tan)
+            let dispCap: Float = (tanCell * cellsF) / (2.0 * leverBound * Tan)
+            let fanCap: Float = (tanFan * cellsF) / (n1F * leverBound * Tan)
             let maxBudget = min(budgetPct / 100.0, min(dispCap, fanCap))
 
             // —— 物理厘米 → 屏幕视差占比（0.8873 = IPD/W = 6.3/7.1）——
@@ -628,14 +632,16 @@ final class Renderer {
             // 瑞利硬锁：相邻视点的屏幕位移 ≤ 0.45% 屏宽（≈6.5 px = 1 个透镜周期）
             // 超出则单眼会看到"分离的硬边"而非"柔化边缘"
             // 常态 = 瑞利无重影锁 0.45% 屏宽；极限模式放宽 3.1 倍（立体更强、接受重影）
-            let maxStepShift: Float = extreme ? 0.028 : 0.009
+            let maxStepShift: Float = (extreme ? 0.028 : 0.009) * rlMul
             // 每步"净位移" = 体积梯度 − 中心深度梯度（两者在 shift 里相减）
             // 只对净位移施加上限，保持体积/中心的比例不变
             let rawVolStep = Float(2.0 * Double(effVol) / cells) * perspComp
             let rawCenStep = Float(2.0 * Double(effCen) / cells)
             let residual = abs(rawVolStep - rawCenStep)
-            let rScale = residual > maxStepShift ? maxStepShift / max(residual, 1e-6) : 1.0
-            rayleighHit = rScale < 0.999
+            // 软饱和（tanh）而不是硬夹断：缩放/旋转时视差连续变化，不会在阈值处跳变闪烁
+            let softRes = maxStepShift * tanh(residual / maxStepShift)
+            let rScale = residual > 1e-6 ? softRes / residual : 1.0
+            rayleighHit = rScale < 0.97
             let stepShift = rawVolStep * rScale
             let stepVol = stepShift / perspComp
             effVolTot = effVol; stepVolDbg = stepVol
@@ -1168,6 +1174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         sliderRow("透视比", 1.05, 4.0, 2.0)
         sliderRow("体积cm", 0.2, 6.0, Double(renderer.volCM))
         sliderRow("出屏cm", 0.0, 16.0, Double(renderer.popCM))
+        sliderRow("立体强度", 0.3, 4.0, Double(renderer.rlMul))
         sliderRow("线数", 18.0, 22.0, Double(renderer.params.lineNumber))
         sliderRow("倾斜", 0.05, 0.17, Double(renderer.params.obliquity))
         sliderRow("相位", 0.0, 40.0, Double(renderer.params.deviation))
@@ -1382,6 +1389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, MTKViewDelegate {
         case "中心cm": renderer.centerCM = Float(val)
         case "预算%": renderer.budgetPct = Float(val)
         case "出屏cm": renderer.popCM = Float(val)
+        case "立体强度": renderer.rlMul = Float(val); markDirty()
         case "观看距离": renderer.viewDist = Float(val)
         case "扇区Z°": renderer.zoneDeg = Float(val)
         case "透视比":
